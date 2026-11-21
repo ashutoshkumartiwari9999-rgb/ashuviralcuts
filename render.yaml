@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: ashuviralcuts
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: |
+      apt-get update -qq && apt-get install -y -qq ffmpeg
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NEONCLIPPING_DATA_DIR
+        value: /tmp/ashuviralcuts_data
+    disk:
+      name: clips-data
+      mountPath: /tmp/ashuviralcuts_data
+      sizeGB: 1
