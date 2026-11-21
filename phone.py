@@ -1,5 +1,5 @@
 
-"""Phone remote: use NeonClipping from a phone on the same Wi-Fi."""
+"""Phone remote for NeonClipping."""
 
 import hmac
 import hashlib
@@ -13,29 +13,30 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-LOCAL = ('127.0.0.1', '::1', 'localhost')
+LOCAL = ("127.0.0.1", "::1", "localhost")
 
 ALLOW = (
-    '/m', '/manifest.webmanifest', '/phone-icon.svg',
-    '/live', '/live-active', '/library', '/media', '/text',
-    '/make', '/status', '/clips', '/feedback', '/creators',
-    '/donate', '/healthz', '/assets'
+    "/m", "/manifest.webmanifest", "/phone-icon.svg",
+    "/live", "/live-active", "/library", "/media", "/text",
+    "/make", "/status", "/clips", "/feedback", "/creators",
+    "/donate", "/healthz", "/assets"
 )
 
-MAX_TRIES, LOCK_SECONDS = 5, 600
-COOKIE = 'nc_phone'
+MAX_TRIES = 5
+LOCK_SECONDS = 600
+COOKIE = "nc_phone"
 
 
 def is_local(host):
-    return host in LOCAL or str(host).startswith('127.')
+    return host in LOCAL or str(host).startswith("127.")
 
 
 def allowed(path):
-    return any(path == p or path.startswith(p + '/') for p in ALLOW)
+    return any(path == p or path.startswith(p + "/") for p in ALLOW)
 
 
 def lan_enabled():
-    return os.environ.get('NEONCLIPPING_LAN') == '1'
+    return os.environ.get("NEONCLIPPING_LAN") == "1"
 
 
 def lan_ips():
@@ -43,7 +44,7 @@ def lan_ips():
 
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('10.255.255.255', 1))
+        s.connect(("10.255.255.255", 1))
         found.append(s.getsockname()[0])
         s.close()
     except OSError:
@@ -60,11 +61,11 @@ def lan_ips():
     out = []
 
     for ip in found:
-        parts = ip.split('.')
+        parts = ip.split(".")
         private = (
-            ip.startswith(('10.', '192.168.'))
+            ip.startswith(("10.", "192.168."))
             or (
-                ip.startswith('172.')
+                ip.startswith("172.")
                 and len(parts) > 1
                 and 16 <= int(parts[1]) <= 31
             )
@@ -77,103 +78,103 @@ def lan_ips():
 
 
 def attach(app, data, root):
-    store = Path(data) / 'phone.json'
+    store = Path(data) / "phone.json"
     fails = {}
+
+    def new_pin():
+        j = {
+            "pin": f"{secrets.randbelow(10**6):06d}",
+            "salt": secrets.token_hex(16)
+        }
+
+        store.parent.mkdir(parents=True, exist_ok=True)
+        tmp = store.with_suffix(".tmp")
+        tmp.write_text(json.dumps(j), encoding="utf-8")
+        tmp.replace(store)
+
+        return j
 
     def load():
         try:
-            j = json.loads(store.read_text(encoding='utf-8'))
-            if isinstance(j, dict) and j.get('pin') and j.get('salt'):
+            j = json.loads(store.read_text(encoding="utf-8"))
+            if isinstance(j, dict) and j.get("pin") and j.get("salt"):
                 return j
         except (OSError, ValueError):
             pass
 
         return new_pin()
 
-    def new_pin():
-        j = {
-            'pin': f'{secrets.randbelow(10**6):06d}',
-            'salt': secrets.token_hex(16)
-        }
-
-        store.parent.mkdir(parents=True, exist_ok=True)
-        tmp = store.with_suffix('.tmp')
-        tmp.write_text(json.dumps(j), encoding='utf-8')
-        tmp.replace(store)
-
-        return j
-
     def token(j):
         return hmac.new(
-            j['salt'].encode(),
-            j['pin'].encode(),
+            j["salt"].encode(),
+            j["pin"].encode(),
             hashlib.sha256
         ).hexdigest()
 
     def authed(request):
-        got = request.cookies.get(COOKIE, '')
+        got = request.cookies.get(COOKIE, "")
         return bool(got) and hmac.compare_digest(got, token(load()))
 
     def port_of(request):
-        return os.environ.get('NEONCLIPPING_PORT') or str(
+        return os.environ.get("NEONCLIPPING_PORT") or str(
             request.url.port or 8770
         )
 
-    @app.middleware('http')
+    @app.middleware("http")
     async def gate(request: Request, call_next):
-        host = request.client.host if request.client else ''
+        host = request.client.host if request.client else ""
 
         if is_local(host):
             return await call_next(request)
 
         path = request.url.path
 
-        # FIX: Cloud par normal website routes ko block mat karo.
-        # Sirf phone-related routes ko LAN OFF hone par block karo.
+        # Cloud deployment: keep normal website accessible.
+        # Phone remote remains disabled unless explicitly enabled.
         if not lan_enabled():
-            if path == '/m' or path.startswith('/m/') or path.startswith('/phone'):
+            if path == "/m" or path.startswith("/m/") or path.startswith("/phone"):
                 return JSONResponse(
-                    {'detail': 'Phone access is off on this computer.'},
+                    {"detail": "Phone access is off on this computer."},
                     status_code=403
                 )
 
             return await call_next(request)
 
         if path in (
-            '/m', '/m/login',
-            '/manifest.webmanifest', '/phone-icon.svg'
+            "/m", "/m/login",
+            "/manifest.webmanifest", "/phone-icon.svg"
         ):
             return await call_next(request)
 
-        if not allowed(path) or path.startswith('/phone'):
+        if not allowed(path) or path.startswith("/phone"):
             return JSONResponse(
-                {'detail': 'This is only available on the PC.'},
+                {"detail": "This is only available on the PC."},
                 status_code=403
             )
 
         if not authed(request):
             return JSONResponse(
-                {'detail': 'Enter the PIN shown on the PC.'},
+                {"detail": "Enter the PIN shown on the PC."},
                 status_code=401
             )
 
         return await call_next(request)
 
-    @app.get('/m')
+    @app.get("/m")
     def mobile_page():
         return HTMLResponse(
-            (Path(root) / 'mobile.html').read_text(encoding='utf-8')
+            (Path(root) / "mobile.html").read_text(encoding="utf-8")
         )
 
-    @app.post('/m/login')
+    @app.post("/m/login")
     def login(b: dict, request: Request):
-        ip = request.client.host if request.client else '?'
+        ip = request.client.host if request.client else "?"
         count, first = fails.get(ip, [0, time.time()])
 
         if count >= MAX_TRIES and time.time() - first < LOCK_SECONDS:
             raise HTTPException(
                 429,
-                'Too many wrong PINs. Try again in a few minutes.'
+                "Too many wrong PINs. Try again in a few minutes."
             )
 
         if time.time() - first >= LOCK_SECONDS:
@@ -182,78 +183,78 @@ def attach(app, data, root):
         j = load()
 
         if not hmac.compare_digest(
-            str(b.get('pin', '')).strip(), j['pin']
+            str(b.get("pin", "")).strip(), j["pin"]
         ):
             fails[ip] = [count + 1, first]
-            raise HTTPException(401, 'Wrong PIN.')
+            raise HTTPException(401, "Wrong PIN.")
 
         fails.pop(ip, None)
 
-        resp = JSONResponse({'ok': True})
+        resp = JSONResponse({"ok": True})
         resp.set_cookie(
             COOKIE,
             token(j),
             httponly=True,
-            samesite='lax',
+            samesite="lax",
             max_age=30 * 24 * 3600
         )
 
         return resp
 
-    @app.get('/phone/status')
+    @app.get("/phone/status")
     def status(request: Request):
-        host = request.client.host if request.client else ''
+        host = request.client.host if request.client else ""
 
         if not is_local(host):
             raise HTTPException(
-                403, 'This is only available on the PC.'
+                403, "This is only available on the PC."
             )
 
         port = port_of(request)
         on = lan_enabled()
 
         return {
-            'enabled': on,
-            'port': port,
-            'urls': [
-                f'http://{ip}:{port}/m' for ip in lan_ips()
+            "enabled": on,
+            "port": port,
+            "urls": [
+                f"http://{ip}:{port}/m" for ip in lan_ips()
             ] if on else [],
-            'pin': load()['pin'] if on else None
+            "pin": load()["pin"] if on else None
         }
 
-    @app.post('/phone/newpin')
+    @app.post("/phone/newpin")
     def newpin(request: Request):
-        host = request.client.host if request.client else ''
+        host = request.client.host if request.client else ""
 
         if not is_local(host):
             raise HTTPException(
-                403, 'This is only available on the PC.'
+                403, "This is only available on the PC."
             )
 
-        return {'pin': new_pin()['pin']}
+        return {"pin": new_pin()["pin"]}
 
-    @app.get('/manifest.webmanifest')
+    @app.get("/manifest.webmanifest")
     def manifest():
         return JSONResponse(
             {
-                'name': 'NeonClipping',
-                'short_name': 'NeonClip',
-                'start_url': '/m',
-                'scope': '/',
-                'display': 'standalone',
-                'background_color': '#0b0912',
-                'theme_color': '#0b0912',
-                'icons': [{
-                    'src': '/phone-icon.svg',
-                    'sizes': 'any',
-                    'type': 'image/svg+xml',
-                    'purpose': 'any'
+                "name": "NeonClipping",
+                "short_name": "NeonClip",
+                "start_url": "/m",
+                "scope": "/",
+                "display": "standalone",
+                "background_color": "#0b0912",
+                "theme_color": "#0b0912",
+                "icons": [{
+                    "src": "/phone-icon.svg",
+                    "sizes": "any",
+                    "type": "image/svg+xml",
+                    "purpose": "any"
                 }]
             },
-            media_type='application/manifest+json'
+            media_type="application/manifest+json"
         )
 
-    @app.get('/phone-icon.svg')
+    @app.get("/phone-icon.svg")
     def icon():
         svg = (
             "<svg xmlns='http://www.w3.org/2000/svg' "
@@ -267,4 +268,4 @@ def attach(app, data, root):
             "</svg>"
         )
 
-        return Response(svg, media_type='image/svg+xml')
+        return Response(svg, media_type="image/svg+xml")
