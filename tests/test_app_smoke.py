@@ -126,6 +126,11 @@ class AppSmokeTests(unittest.TestCase):
         service = config["services"][0]
         self.assertEqual(service["plan"], "free")
         self.assertNotIn("disk", service)
+        self.assertIn("DENO_INSTALL=/opt/render/project/src/.deno", service["buildCommand"])
+        self.assertIn("https://deno.land/install.sh", service["buildCommand"])
+        self.assertIn("/opt/render/project/src/.deno/bin", service["startCommand"])
+        requirements = (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(encoding="utf-8")
+        self.assertIn("yt-dlp[default]==2026.10.26", requirements)
         variables = {item.get("key"): item for item in service["envVars"] if item.get("key")}
         self.assertEqual(variables["NEONCLIPPING_REQUIRE_AUTH"]["value"], "0")
         self.assertEqual(variables["NEONCLIPPING_PRIVATE_COOKIE_ADMIN"]["value"], "1")

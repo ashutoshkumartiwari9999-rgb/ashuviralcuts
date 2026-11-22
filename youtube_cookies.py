@@ -16,6 +16,65 @@ LOGIN_COOKIE = "LOGIN_INFO"
 AUTH_SIGNATURE_COOKIES = ("SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID")
 
 
+def _classify_youtube_failure(message: str, logged_categories=()) -> str:
+    """Classify yt-dlp diagnostics without retaining or emitting their raw text."""
+    categories = set(logged_categories or ())
+    for category in ("po_token", "javascript_runtime", "rate_limited", "authentication", "forbidden", "unavailable", "no_formats", "network", "dependency"):
+        if category in categories:
+            return category
+    lower = str(message).lower()
+    if "po token" in lower or "po_token" in lower or "proof of origin" in lower:
+        return "po_token"
+    if any(term in lower for term in (
+        "no supported javascript runtime", "javascript runtime could not be found",
+        "javascript challenge", "signature/nsig extraction failed", "nsig extraction failed",
+        "ejs challenge solver", "challenge solver script",
+    )):
+        return "javascript_runtime"
+    if "429" in lower or "too many requests" in lower or "rate limit" in lower or "unusual traffic" in lower:
+        return "rate_limited"
+    if any(term in lower for term in ("sign in to confirm", "not a bot", "login required", "authentication", "confirm your age", "cookies are no longer valid")):
+        return "authentication"
+    if "403" in lower or "forbidden" in lower or "blocked" in lower:
+        return "forbidden"
+    if any(term in lower for term in ("video unavailable", "private video", "video has been removed", "404 not found")):
+        return "unavailable"
+    if any(term in lower for term in ("requested format is not available", "no video formats found", "no formats found")):
+        return "no_formats"
+    if any(term in lower for term in ("timed out", "timeout", "name or service not known", "temporary failure in name resolution", "connection reset", "connection refused", "ssl: certificate")):
+        return "network"
+    if "no module named 'yt_dlp'" in lower or "no module named \"yt_dlp\"" in lower:
+        return "dependency"
+    return "unknown"
+
+
+class _SafeYtDlpLogger:
+    """Capture only diagnostic categories; never store or emit yt-dlp messages."""
+    def __init__(self):
+        self.categories = set()
+
+    def _inspect(self, message):
+        category = _classify_youtube_failure(str(message))
+        if category != "unknown":
+            self.categories.add(category)
+
+    def debug(self, message):
+        self._inspect(message)
+
+    def warning(self, message):
+        self._inspect(message)
+
+    def error(self, message):
+        self._inspect(message)
+
+
+class YoutubeDownloadFailure(RuntimeError):
+    """Sanitized yt-dlp failure category for display in the job UI."""
+    def __init__(self, category):
+        self.youtube_category = category
+        super().__init__("YouTube download failed")
+
+
 def is_youtube_url(url: str) -> bool:
     host = (urlparse(str(url)).hostname or "").lower().rstrip(".")
     return host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com")
@@ -185,8 +244,14 @@ def youtube_dl(url: str, data_dir: Path, options: dict):
     """Create a private per-job cookie copy and always remove it after yt-dlp exits."""
     temp_cookie = None
     configured = dict(options)
+    diagnostics = None
     try:
         if is_youtube_url(url):
+            diagnostics = _SafeYtDlpLogger()
+            configured["logger"] = diagnostics
+            # Keep warnings inside the in-memory classifier; quiet mode and the
+            # custom logger prevent raw yt-dlp text from reaching stdout/stderr.
+            configured["no_warnings"] = False
             source = cookie_path(data_dir)
             with _LOCK:
                 if source.is_file():
@@ -205,6 +270,9 @@ def youtube_dl(url: str, data_dir: Path, options: dict):
             with yt_dlp.YoutubeDL(configured) as downloader:
                 yield downloader
         except Exception as error:
+            if is_youtube_url(url):
+                category = _classify_youtube_failure(str(error), diagnostics.categories if diagnostics else ())
+                raise YoutubeDownloadFailure(category) from None
             raise RuntimeError(user_error(error, url, data_dir)) from None
     finally:
         if temp_cookie:
@@ -216,7 +284,24 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
     if not is_youtube_url(url):
         return str(error)[-700:]
     message = str(error).lower()
-    if any(term in message for term in ("sign in to confirm", "not a bot", "cookies", "login required", "authentication", "confirm your age")):
+    category = getattr(error, "youtube_category", None) or _classify_youtube_failure(message)
+    if category == "javascript_runtime":
+        return "YouTube extraction could not solve its JavaScript challenge. This server needs the supported Deno runtime and yt-dlp-ejs component; check the deployment build and retry. No cookie values or yt-dlp log text were exposed."
+    if category == "po_token":
+        return "YouTube requires a Proof-of-Origin (PO) token for this video or stream. Cookies alone cannot provide it; this request was not bypassed. Try another publicly available video/format or wait for supported token-provider configuration."
+    if category == "rate_limited":
+        return "YouTube rate-limited this request (HTTP 429 or equivalent). This can be an account or shared server-IP limit. Wait before retrying; repeated attempts may extend the block."
+    if category == "forbidden":
+        return "YouTube denied the media request (HTTP 403). The cause can be a PO-token requirement, an expired stream URL, or a network/IP restriction; the safe diagnostic did not identify which one."
+    if category == "unavailable":
+        return "YouTube reports that this video is unavailable, private, removed, or restricted for this request. Check the public link and its viewing restrictions."
+    if category == "no_formats":
+        return "YouTube returned no format this service can download for this video. The video may require a PO token or have account, region, or playback restrictions."
+    if category == "network":
+        return "The server could not complete its connection to YouTube (timeout, DNS, TLS, or connection error). Retry later; this is not a cookie-content error."
+    if category == "dependency":
+        return "The YouTube downloader dependency is missing in this deployment. Rebuild the service from its pinned requirements."
+    if category == "authentication" or any(term in message for term in ("sign in to confirm", "not a bot", "cookies", "login required", "authentication", "confirm your age")):
         status = cookie_state(data_dir)
         if status == "missing":
             return "YouTube needs a signed-in browser session, but no cookies are configured on this server. Sign in to YouTube, export a fresh Netscape-format cookies.txt, and upload it under Bring your video → YouTube cookies."

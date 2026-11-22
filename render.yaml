@@ -7,10 +7,12 @@ services:
     plan: free
     healthCheckPath: /healthz
     buildCommand: |
-      apt-get update -qq && apt-get install -y -qq ffmpeg
+      apt-get update -qq && apt-get install -y -qq ffmpeg curl
+      export DENO_INSTALL=/opt/render/project/src/.deno
+      curl -fsSL https://deno.land/install.sh | sh
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: export PATH=/opt/render/project/src/.deno/bin:$PATH && python app.py
     envVars:
       - key: PORT
         value: 10000

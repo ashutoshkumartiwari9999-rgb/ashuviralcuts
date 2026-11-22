@@ -107,6 +107,8 @@ class YoutubeCookieTests(unittest.TestCase):
                 with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {"quiet": True}):
                     temporary = Path(observed["cookiefile"])
                     self.assertTrue(temporary.exists())
+                    self.assertFalse(observed["no_warnings"])
+                    self.assertTrue(callable(observed["logger"].warning))
                     self.assertEqual(temporary.read_bytes(), SAMPLE)
                     self.assertTrue(observed["temp_exists_during_job"])
                 self.assertFalse(temporary.exists())
@@ -124,6 +126,30 @@ class YoutubeCookieTests(unittest.TestCase):
         self.assertIn("Netscape cookies.txt", message)
         self.assertNotIn("private cookie token", message)
         self.assertEqual(youtube_cookies.user_error(RuntimeError("twitch problem"), "https://twitch.tv/a"), "twitch problem")
+
+    def test_youtube_failures_get_safe_specific_messages(self):
+        cases = (
+            ("No supported JavaScript runtime could be found", "JavaScript challenge"),
+            ("PO Token required for GVS request", "Proof-of-Origin (PO) token"),
+            ("HTTP Error 429: Too Many Requests", "rate-limited this request"),
+            ("HTTP Error 403: Forbidden", "denied the media request"),
+            ("Requested format is not available", "returned no format"),
+        )
+        url = "https://www.youtube.com/watch?v=abc"
+        for detail, expected in cases:
+            with self.subTest(category=expected):
+                error = youtube_cookies.YoutubeDownloadFailure(
+                    youtube_cookies._classify_youtube_failure(detail + " cookie=do-not-expose")
+                )
+                message = youtube_cookies.user_error(error, url)
+                self.assertIn(expected, message)
+                self.assertNotIn("do-not-expose", message)
+
+    def test_safe_yt_dlp_logger_keeps_only_categories(self):
+        logger = youtube_cookies._SafeYtDlpLogger()
+        logger.warning("No supported JavaScript runtime could be found; private-token=do-not-expose")
+        self.assertEqual(logger.categories, {"javascript_runtime"})
+        self.assertNotIn("do-not-expose", repr(logger.categories))
 
 if __name__ == "__main__":
     unittest.main()
