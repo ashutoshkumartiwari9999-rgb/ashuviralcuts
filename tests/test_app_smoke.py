@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import httpx
 
-COOKIE_SAMPLE = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\tprivate-cookie-value\n"
+COOKIE_SAMPLE = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\ttest-login-cookie\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\ttest-signature-cookie\n"
 
 
 _TEST_DATA = tempfile.TemporaryDirectory(prefix="ashuviralcuts-test-")

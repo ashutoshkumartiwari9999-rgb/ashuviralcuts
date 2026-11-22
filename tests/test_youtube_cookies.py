@@ -8,14 +8,15 @@ import youtube_cookies
 
 SAMPLE = (
     b"# Netscape HTTP Cookie File\n"
-    b".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSID\tsecret-cookie-value\n"
+    b".youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\ttest-login-cookie\n"
+    b".youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\ttest-signature-cookie\n"
 )
 
 
 class YoutubeCookieTests(unittest.TestCase):
     def test_cookie_validation_requires_netscape_youtube_entry(self):
         parsed = youtube_cookies.validate_cookie_text(SAMPLE)
-        self.assertIn("secret-cookie-value", parsed)
+        self.assertIn("test-login-cookie", parsed)
         with self.assertRaisesRegex(ValueError, "Netscape"):
             youtube_cookies.validate_cookie_text(b"browser-export-json")
         twitch = b".twitch.tv\tTRUE\t/\tTRUE\t2147483647\tsid\tvalue\n"
@@ -26,6 +27,34 @@ class YoutubeCookieTests(unittest.TestCase):
         expired = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1\tSID\tprivate-value\n"
         with self.assertRaisesRegex(ValueError, "expired"):
             youtube_cookies.validate_cookie_text(expired)
+
+    def test_incomplete_auth_cookies_report_names_without_values(self):
+        cases = (
+            (b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\tdummy-secret\n", "LOGIN_INFO"),
+            (b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\tdummy-secret\n", "one of SAPISID"),
+        )
+        for raw, missing in cases:
+            with self.subTest(missing=missing):
+                with self.assertRaises(ValueError) as caught:
+                    youtube_cookies.validate_cookie_text(raw)
+                self.assertIn(missing, str(caught.exception))
+                self.assertNotIn("dummy-secret", str(caught.exception))
+
+    def test_incomplete_saved_cookies_produce_actionable_import_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            youtube_cookies.cookie_path(root).write_text(
+                "# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\tdummy-secret\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(youtube_cookies.cookie_state(root), "incomplete")
+            error = youtube_cookies.user_error(
+                RuntimeError("Sign in to confirm you're not a bot"),
+                "https://www.youtube.com/watch?v=abc",
+                root,
+            )
+            self.assertIn("LOGIN_INFO", error)
+            self.assertNotIn("dummy-secret", error)
 
     def test_cookie_state_reports_only_presence_and_expiration(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -92,7 +121,7 @@ class YoutubeCookieTests(unittest.TestCase):
             RuntimeError("Sign in to confirm you're not a bot; private cookie token"),
             "https://www.youtube.com/watch?v=abc",
         )
-        self.assertIn("Netscape-format cookies.txt", message)
+        self.assertIn("Netscape cookies.txt", message)
         self.assertNotIn("private cookie token", message)
         self.assertEqual(youtube_cookies.user_error(RuntimeError("twitch problem"), "https://twitch.tv/a"), "twitch problem")
 
