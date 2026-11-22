@@ -128,7 +128,9 @@ class AppSmokeTests(unittest.TestCase):
         self.assertNotIn("disk", service)
         self.assertIn("DENO_INSTALL=/opt/render/project/src/.deno", service["buildCommand"])
         self.assertIn("https://deno.land/install.sh", service["buildCommand"])
-        self.assertIn("/opt/render/project/src/.deno/bin", service["startCommand"])
+        self.assertIn('NEONCLIPPING_DENO_PATH="$DENO_INSTALL/bin/deno"', service["startCommand"])
+        self.assertIn('test -x "$NEONCLIPPING_DENO_PATH"', service["startCommand"])
+        self.assertIn('"$DENO_INSTALL/bin/deno" --version', service["buildCommand"])
         requirements = (Path(__file__).resolve().parents[1] / "requirements.txt").read_text(encoding="utf-8")
         self.assertIn("yt-dlp[default]==2026.10.26", requirements)
         variables = {item.get("key"): item for item in service["envVars"] if item.get("key")}

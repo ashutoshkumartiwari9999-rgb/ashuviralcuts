@@ -10,9 +10,11 @@ services:
       apt-get update -qq && apt-get install -y -qq ffmpeg curl
       export DENO_INSTALL=/opt/render/project/src/.deno
       curl -fsSL https://deno.land/install.sh | sh
+      test -x "$DENO_INSTALL/bin/deno"
+      "$DENO_INSTALL/bin/deno" --version
       pip install --upgrade pip
       pip install -r requirements.txt
-    startCommand: export PATH=/opt/render/project/src/.deno/bin:$PATH && python app.py
+    startCommand: export DENO_INSTALL=/opt/render/project/src/.deno && export PATH="$DENO_INSTALL/bin:$PATH" && export NEONCLIPPING_DENO_PATH="$DENO_INSTALL/bin/deno" && test -x "$NEONCLIPPING_DENO_PATH" && exec python app.py
     envVars:
       - key: PORT
         value: 10000

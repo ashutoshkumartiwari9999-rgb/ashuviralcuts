@@ -252,6 +252,11 @@ def youtube_dl(url: str, data_dir: Path, options: dict):
             # Keep warnings inside the in-memory classifier; quiet mode and the
             # custom logger prevent raw yt-dlp text from reaching stdout/stderr.
             configured["no_warnings"] = False
+            # Render installs Deno in a project-local directory, so tell
+            # yt-dlp its exact path instead of relying on process PATH lookup.
+            deno_path = os.environ.get("NEONCLIPPING_DENO_PATH")
+            if deno_path:
+                configured.setdefault("js_runtimes", {"deno": {"path": deno_path}})
             source = cookie_path(data_dir)
             with _LOCK:
                 if source.is_file():

@@ -151,5 +151,20 @@ class YoutubeCookieTests(unittest.TestCase):
         self.assertEqual(logger.categories, {"javascript_runtime"})
         self.assertNotIn("do-not-expose", repr(logger.categories))
 
+    def test_configured_deno_path_is_passed_to_yt_dlp_for_youtube_only(self):
+        observed = []
+        class FakeDownloader:
+            def __init__(self, options): observed.append(options)
+            def __enter__(self): return self
+            def __exit__(self, *_): return False
+        with patch.dict("os.environ", {"NEONCLIPPING_DENO_PATH": "/render/.deno/bin/deno"}):
+            with patch("yt_dlp.YoutubeDL", FakeDownloader):
+                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", Path("."), {}):
+                    pass
+                with youtube_cookies.youtube_dl("https://twitch.tv/channel", Path("."), {}):
+                    pass
+        self.assertEqual(observed[0]["js_runtimes"], {"deno": {"path": "/render/.deno/bin/deno"}})
+        self.assertNotIn("js_runtimes", observed[1])
+
 if __name__ == "__main__":
     unittest.main()
