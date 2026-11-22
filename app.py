@@ -1,9 +1,9 @@
 from pathlib import Path
+from contextlib import asynccontextmanager
 import json, subprocess, uuid, threading, shutil
 import sys
 import time
 import os
-import yt_dlp
 from standalone import attach
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import HTMLResponse, FileResponse
@@ -16,10 +16,28 @@ import brands
 import hooks
 import curation
 import facecam_detect
+import storage
+import youtube_cookies
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.environ.get('NEONCLIPPING_DATA_DIR',str(ROOT/'data'))).resolve();DATA.mkdir(parents=True,exist_ok=True)
-app=FastAPI()
+@asynccontextmanager
+async def lifespan(_app):
+ _schedule_startup_maintenance()
+ yield
+
+app=FastAPI(lifespan=lifespan)
+app.add_middleware(storage.UploadRequestLimitMiddleware)
 state={}
+
+def _startup_maintenance():
+ # Give the first page and health check a head start; the cleanup walk is data-size dependent.
+ time.sleep(15)
+ try:storage.cleanup_temporary(DATA)
+ except Exception:pass
+
+def _schedule_startup_maintenance():
+ threading.Thread(target=_startup_maintenance,daemon=True,name='storage-maintenance').start()
+
 def probe(p):
  r=subprocess.run(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(p)],capture_output=True,text=True,check=True)
  j=json.loads(r.stdout);v=next(x for x in j['streams'] if x['codec_type']=='video')
@@ -36,12 +54,32 @@ def native_layouts(top:float=.32,aspect:str='vertical',resolution:int=1080):
 
 @app.post('/upload')
 async def upload(file:UploadFile=File(...)):
- id=uuid.uuid4().hex;p=DATA/(id+'.mp4')
- with p.open('wb') as out:
-  while b:=await file.read(4*1024*1024):out.write(b)
- try:m=probe(p)
- except Exception:
-  p.unlink(missing_ok=True);raise HTTPException(400,'Choose a playable video file.')
+ suffix=Path(file.filename or '').suffix.lower()
+ if suffix not in {'.mp4','.mov','.m4v','.mkv','.webm','.avi','.mpeg','.mpg','.3gp','.wmv','.flv','.ts'}:
+  raise HTTPException(415,'Upload a supported video file (MP4, MOV, M4V, MKV, WebM, AVI, MPEG, 3GP, WMV, FLV or TS).')
+ if file.content_type and not (file.content_type.startswith('video/') or file.content_type in ('application/octet-stream','application/x-matroska')):
+  raise HTTPException(415,'The uploaded file must be a video.')
+ limit=storage.upload_limit_bytes();id=uuid.uuid4().hex;p=DATA/(id+'.mp4');temp=DATA/(id+'.upload');size=0
+ announced=file.headers.get('content-length') if file.headers else None
+ try:
+  if announced and int(announced)>limit+1024*1024:
+   raise HTTPException(413,f'Video is larger than the {limit//storage.MIB} MB upload limit.')
+  with temp.open('wb') as out:
+   while chunk:=await file.read(1024*1024):
+    size+=len(chunk)
+    if size>limit:raise HTTPException(413,f'Video is larger than the {limit//storage.MIB} MB upload limit.')
+    storage.ensure_capacity(DATA,len(chunk));out.write(chunk)
+  if not size:raise HTTPException(400,'The uploaded file is empty.')
+  try:m=probe(temp)
+  except Exception as e:raise HTTPException(400,'Choose a valid, playable video file.') from e
+  if m['duration']<=0 or m['w']<=0 or m['h']<=0:raise HTTPException(400,'The video has no usable picture or duration.')
+  storage.ensure_capacity(DATA)
+  temp.replace(p)
+ except storage.StorageLimitError as e:
+  raise HTTPException(507,str(e)) from e
+ finally:
+  temp.unlink(missing_ok=True)
+  await file.close()
  return {'id':id,**m}
 @app.get('/media/{id}')
 def media(id:str):
@@ -51,8 +89,8 @@ def media(id:str):
  return FileResponse(p,media_type='video/mp4')
 @app.get('/assets/{name}')
 def assets(name:str):
- if name not in ('app.js','style.css','extras.js','transcripts.js','vision.js'):raise HTTPException(404)
- return FileResponse(ROOT/name)
+ if name not in ('app.js','style.css','extras.js','transcripts.js','vision.js','security.js','storage.js','mobile.js','youtube-cookies.js'):raise HTTPException(404)
+ return FileResponse(ROOT/name,headers={'Cache-Control':'public, max-age=300'})
 @app.get('/text/{id}/{kind}')
 def text_file(id:str,kind:str):
  if not id.isalnum() or kind not in ('srt','ass','vtt'):raise HTTPException(404)
@@ -116,6 +154,9 @@ def export(b:dict):
  except (KeyError,ValueError,TypeError,OverflowError):raise HTTPException(400,'Check crop regions, face height and caption position.')
  try:width,height,fps=output_settings(b)
  except (ValueError,TypeError,OverflowError) as e:raise HTTPException(400,str(e))
+ try:storage.ensure_capacity(DATA,storage.estimate_output_bytes(end-start,int(b.get('resolution',1080)),width,height)+32*storage.MIB)
+ except storage.StorageLimitError as e:raise HTTPException(507,str(e)) from e
+ except (ValueError,TypeError,OverflowError) as e:raise HTTPException(400,'Choose a valid output resolution.') from e
  if b.get('captions') and 'words' in b:
   try:b={**b,'words':subtitles.validate_words(b['words'],end-start)}
   except (ValueError,KeyError,TypeError,OverflowError) as e:raise HTTPException(400,str(e))
@@ -161,8 +202,8 @@ def export(b:dict):
  threading.Thread(target=work,daemon=True).start();return {'job':job}
 PAD=4.0         # seconds fetched before a section: yt-dlp cuts on a keyframe, export trims exactly
 FAST_OVER=600   # seconds: longer videos go audio-first, short ones are downloaded whole
-def _yt(opts):
- return yt_dlp.YoutubeDL({'noplaylist':True,'quiet':True,'no_warnings':True,'socket_timeout':20,'retries':3,'fragment_retries':3,'concurrent_fragment_downloads':6,**opts})
+def _yt(opts,url):
+ return youtube_cookies.youtube_dl(url,DATA,{'noplaylist':True,'quiet':True,'no_warnings':True,'socket_timeout':20,'retries':3,'fragment_retries':3,'concurrent_fragment_downloads':6,**opts})
 def _dur(p):
  r=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0',str(p)],capture_output=True,text=True,check=True);return float(r.stdout.strip())
 
@@ -206,6 +247,9 @@ def make(b:dict):
  """One click. Short video: download, smart highlights, export. Long video (PeakCut-style): download AUDIO only, pick moments from
  audio + transcript, then fetch just those video sections. Clips stream into state[job]['clips']."""
  url,src0=app.neon['new_source'](b);save=app.neon['save']
+ if url:
+  try:storage.ensure_capacity(DATA,64*storage.MIB)
+  except storage.StorageLimitError as e:raise HTTPException(507,str(e)) from e
  try:
   count=max(1,min(12,int(b.get('count',4))));raw_max=float(b.get('max_len',b.get('length',60)));raw_min=float(b.get('min_len',30))
   if not (math.isfinite(raw_max) and math.isfinite(raw_min)):raise ValueError()
@@ -233,7 +277,7 @@ def make(b:dict):
    fast=False;title='';yt_words=None;video_lang=''
    if url:
     save(job,{'stage':'Reading video info','progress':.01})
-    with _yt({'skip_download':True}) as y:info=y.extract_info(url,download=False)
+    with _yt({'skip_download':True},url) as y:info=y.extract_info(url,download=False)
     if info.get('is_live') or info.get('live_status') in ('is_live','is_upcoming'):
      raise RuntimeError('This stream is live right now. Use the Live clipping panel to clip it while it is on, or wait until it ends and use Make clips on the finished video.')
     video_lang=str(info.get('language') or '')
@@ -258,7 +302,7 @@ def make(b:dict):
     from yt_dlp.utils import download_range_func
     name='lr_'+uuid.uuid4().hex
     with _yt({'format':'worst[ext=mp4]/bv*[height<=240][ext=mp4]/worst','outtmpl':str(DATA/(name+'.%(ext)s')),'merge_output_format':'mp4',
-              'download_ranges':download_range_func(None,[(max(0,c['start']),c['end'])])}) as y:y.download([u])
+              'download_ranges':download_range_func(None,[(max(0,c['start']),c['end'])])},u) as y:y.download([u])
     f=next(x for x in DATA.glob(name+'.*') if x.suffix not in ('.part','.ytdl'))
     return f,0.0
    def choose(pool_clips,locate):
@@ -307,7 +351,7 @@ def make(b:dict):
     def hook(d):
      t=d.get('total_bytes') or d.get('total_bytes_estimate')
      if t and d.get('status')=='downloading':save(job,{'stage':f"Downloading audio {d['downloaded_bytes']/1048576:.0f}/{t/1048576:.0f} MB",'progress':.02+.1*d['downloaded_bytes']/t})
-    with _yt({'format':'ba[ext=m4a]/ba/worst','outtmpl':str(DATA/(job+'.audio.%(ext)s')),'progress_hooks':[hook]}) as y:y.download([url])
+    with _yt({'format':'ba[ext=m4a]/ba/worst','outtmpl':str(DATA/(job+'.audio.%(ext)s')),'progress_hooks':[hook]},url) as y:y.download([url])
     p=next(f for f in DATA.glob(job+'.audio.*') if f.suffix not in ('.part','.ytdl'));duration=_dur(p);sid=job
     save(job,{'meta':{'duration':duration},'stage':'Finding moments in audio','progress':.12})
     found,engine=ai_found(moments,yt_words,duration) if moments else find(p,duration,count,max_len,lambda f,m:save(job,{'stage':m,'progress':.12+.4*f}),language,DATA,min_len,False,yt_words,False,W,False,profile,focus_brief,include_phrases,exclude_phrases)
@@ -320,7 +364,7 @@ def make(b:dict):
     def section(i,c):
      name=uuid.uuid4().hex
      with _yt({'format':'bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]/b','merge_output_format':'mp4','outtmpl':str(DATA/(name+'.%(ext)s')),
-               'download_ranges':download_range_func(None,[(max(0,c['start']-PAD),c['end']+1)])}) as y:y.download([url])
+               'download_ranges':download_range_func(None,[(max(0,c['start']-PAD),c['end']+1)])},url) as y:y.download([url])
      return name
     pool=ThreadPoolExecutor(max_workers=3);sections=[pool.submit(section,i,c) for i,c in enumerate(found)]
    else:
@@ -528,6 +572,13 @@ def status(id:str):return state.get(id,{'status':'error','error':'Server restart
 @app.get('/runtime')
 def runtime():
  return {'active':[{'id':job,'status':row.get('status'),'stage':row.get('stage') or row.get('message','')} for job,row in list(state.items()) if row.get('status') in ('running','queued','starting','recording')]}
+
+@app.get('/storage')
+def storage_status():return storage.summary(DATA)
+
+
+@app.post('/storage/cleanup')
+def storage_cleanup():return storage.cleanup_temporary(DATA,older_than_hours=24)
 from reedit import attach as attach_reedit
 attach_reedit(app,DATA,state,probe,export,app.neon['save'])
 
@@ -542,7 +593,7 @@ import phone
 phone.attach(app,DATA,ROOT)
 import subtitles,facecam_detect,aiparts
 subtitles.attach(app)
-aiparts.attach(app)
+aiparts.attach(app,DATA)
 facecam_detect.attach(app,DATA)
 brands.attach(app,DATA)
 hooks.attach(app)
@@ -553,6 +604,9 @@ vision.attach(app,DATA,state,probe)
 
 import creators
 creators.attach(app,DATA,LIVE,lambda target,opts,cid:start_live(target,opts,cid))
+
+import security
+security.attach(app)
 
 if __name__=='__main__':
  port=int(os.environ.get('PORT',os.environ.get('NEONCLIPPING_PORT','8770')))

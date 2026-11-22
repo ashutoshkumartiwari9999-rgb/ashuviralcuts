@@ -162,8 +162,11 @@ def parse_answers(text, duration=None, min_len=8, max_len=180):
     return clean[:40], rejected
 
 
-def attach(app):
+def attach(app, data_dir=None):
     from fastapi import HTTPException
+    from pathlib import Path
+    import youtube_cookies
+    data_dir = Path(data_dir or '.')
 
     @app.post('/ai/parts')
     def ai_parts(b: dict):
@@ -178,12 +181,11 @@ def attach(app):
         except (TypeError, ValueError):
             raise HTTPException(400, 'Check the numbers for parts, moments per part and clip length.')
         try:
-            import yt_dlp
             from captions_yt import from_info
-            with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True, 'socket_timeout': 20}) as y:
+            with youtube_cookies.youtube_dl(url,data_dir,{'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True, 'socket_timeout': 20}) as y:
                 info = y.extract_info(url, download=False)
         except Exception as e:
-            raise HTTPException(400, 'Could not read that video: ' + str(e)[:160])
+            raise HTTPException(400, 'Could not read that video: ' + youtube_cookies.user_error(e,url))
         if info.get('is_live') or info.get('live_status') in ('is_live', 'is_upcoming'):
             raise HTTPException(400, 'This stream is live now. Use Live clipping, or wait until it has ended.')
         words = None

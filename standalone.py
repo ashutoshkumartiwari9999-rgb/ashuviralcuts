@@ -6,12 +6,13 @@ import threading
 import shutil
 import time
 import subprocess
-import yt_dlp
-from fastapi import HTTPException
+from fastapi import HTTPException, UploadFile, File
 from highlights import rank
 import smart
 from previews import prepare
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+import storage
+import youtube_cookies
 
 def allowed(url):
     parsed=urlparse(url);host=(parsed.hostname or '').lower()
@@ -45,6 +46,8 @@ def attach(app,DATA,state,probe):
                     cached=DATA/(f.name.split('.')[0]+'.mp4')
                     if cached.exists():probe(cached);return cached.stem,cached
             except (OSError,ValueError,subprocess.SubprocessError):pass
+        try:storage.ensure_capacity(DATA,64*storage.MIB)
+        except storage.StorageLimitError as error:raise HTTPException(507,str(error)) from error
         directory=DATA/job;directory.mkdir(exist_ok=True)
         target=DATA/(job+'.mp4')
         def progress(event):
@@ -56,7 +59,10 @@ def attach(app,DATA,state,probe):
         options={'noplaylist':True,'format':'best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]',
                  'outtmpl':str(directory/'source.%(ext)s'),'merge_output_format':'mp4','socket_timeout':15,'retries':2,'fragment_retries':2,
                  'extractor_retries':1,'progress_hooks':[progress],'quiet':True,'no_warnings':True}
-        with yt_dlp.YoutubeDL(options) as downloader:downloader.download([url])
+        try:
+            with youtube_cookies.youtube_dl(url,DATA,options) as downloader:downloader.download([url])
+        except Exception as error:
+            raise RuntimeError(youtube_cookies.user_error(error,url)) from None
         src=next((p for p in directory.iterdir() if p.suffix in ('.mp4','.mkv','.webm')),None)
         if src is None:raise RuntimeError('Download produced no playable file. Upload the original MP4 instead.')
         if src.suffix=='.mp4':shutil.move(str(src),str(target))
@@ -78,22 +84,48 @@ def attach(app,DATA,state,probe):
 
     app.neon={'download':download,'save':save,'new_source':new_source}
 
+    @app.get('/youtube-cookies/status')
+    def youtube_cookie_status():
+        return {'configured':youtube_cookies.has_cookies(DATA)}
+
+    @app.post('/youtube-cookies')
+    async def upload_youtube_cookies(file:UploadFile=File(...)):
+        name=Path(file.filename or '').name.lower()
+        try:
+            if name!='cookies.txt':raise HTTPException(400,'Rename the Netscape cookie export to cookies.txt before uploading.')
+            raw=await file.read(youtube_cookies.MAX_COOKIE_BYTES+1)
+            try:youtube_cookies.save_cookies(DATA,raw)
+            except ValueError as error:raise HTTPException(400,str(error)) from error
+            return {'configured':True,'message':'YouTube cookies saved privately. Try the video link again.'}
+        finally:
+            await file.close()
+
+    @app.delete('/youtube-cookies')
+    def clear_youtube_cookies():
+        youtube_cookies.remove_cookies(DATA)
+        return {'configured':False,'message':'Saved YouTube cookies were removed.'}
+
     @app.get('/healthz')
-    def health():return {'ok':True,'engine':'standalone','peakcut_required':False}
+    def health():
+        queue=getattr(app,'processing_queue',None);worker=getattr(queue,'worker',None)
+        ready=worker is None or worker.is_alive()
+        return JSONResponse({'ok':ready,'engine':'standalone','peakcut_required':False},status_code=200 if ready else 503)
 
     @app.post('/link')
     def import_link(body:dict):
         url,_=new_source(body)
         if not url:raise HTTPException(400,'Paste a video link.')
+        try:storage.ensure_capacity(DATA,64*storage.MIB)
+        except storage.StorageLimitError as error:raise HTTPException(507,str(error)) from error
         job=uuid.uuid4().hex;save(job,{'status':'running','stage':'Import starting','message':'Getting preview frames; download runs in background','preview_status':'loading','url':url})
         def preview_work():
             try:prepare(url,job,DATA,probe,lambda fields:save(job,fields))
-            except Exception as error:save(job,{'preview_status':'unavailable','preview_error':'Early frames unavailable; full download continues. '+str(error)[-150:]})
+            except Exception as error:save(job,{'preview_status':'unavailable','preview_error':'Early frames unavailable; full download continues. '+youtube_cookies.user_error(error,url)})
         threading.Thread(target=preview_work,daemon=True).start()
         def work():
             try:
                 id,p=download(url,job);save(job,{'status':'done','id':id,**probe(p)})
-            except Exception as error:save(job,{'status':'error','error':'Import failed. Try the original MP4. '+str(error)[-500:]})
+            except Exception as error:save(job,{'status':'error','error':'Import failed. '+youtube_cookies.user_error(error,url)})
         threading.Thread(target=work,daemon=True).start();return {'job':job}
 
     @app.get('/preview/{job}/{index}')
@@ -106,6 +138,9 @@ def attach(app,DATA,state,probe):
     @app.post('/analyze')
     def analyze(body:dict):
         url,src=new_source(body);b_lang=body.get('language') or None
+        if url:
+            try:storage.ensure_capacity(DATA,64*storage.MIB)
+            except storage.StorageLimitError as error:raise HTTPException(507,str(error)) from error
         try:count=max(1,min(12,int(body.get('count',4))));length=max(5,min(120,float(body.get('length',30))))
         except (TypeError,ValueError):raise HTTPException(400,'Choose a valid clip count and length.')
         if not (5<=length<=120):raise HTTPException(400,'Choose a valid clip length.')
@@ -121,7 +156,7 @@ def attach(app,DATA,state,probe):
                 save(job,{'id':job,'status':'done','stage':'Candidates ready','progress':1,'source_id':source_id,'source':{'url':url},
                           'title':'Imported video' if url else 'Uploaded video','clips':clips,'engine':engine,
                           'elapsed_seconds':round(time.monotonic()-began,2),'meta':meta})
-            except Exception as error:save(job,{'id':job,'status':'error','error':str(error)[-700:]})
+            except Exception as error:save(job,{'id':job,'status':'error','error':youtube_cookies.user_error(error,url) if url else str(error)[-700:]})
         threading.Thread(target=work,daemon=True).start();return {'job':job}
 
     @app.get('/analysis/{job}')

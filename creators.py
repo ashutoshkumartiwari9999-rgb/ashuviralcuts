@@ -45,7 +45,7 @@ def parse_creator(text):
     return {'platform': 'twitch', 'ref': channel, 'url': 'https://twitch.tv/' + channel, 'name': channel}
 
 
-def live_target(creator):
+def live_target(creator, data_dir=None):
     """-> ('twitch', channel, url) / ('youtube', video_id, url) when the creator is live right now, else None."""
     if creator['platform'] == 'twitch':
         try:
@@ -56,8 +56,8 @@ def live_target(creator):
             return None
         return ('twitch', creator['ref'], creator['url']) if streams else None
     try:
-        import yt_dlp
-        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True,
+        import youtube_cookies
+        with youtube_cookies.youtube_dl(creator['url'] + '/live',data_dir or Path('.'),{'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True,
                                'socket_timeout': 20}) as y:
             info = y.extract_info(creator['url'] + '/live', download=False)
     except Exception:
@@ -146,7 +146,7 @@ def attach(app, data, live, start_live):
         """Check one creator; start live clipping if they are live and auto is on. Returns True if live."""
         remember_stop_reasons()
         rt = runtime.setdefault(creator['id'], {})
-        target = live_target(creator)
+        target = live_target(creator,data)
         rt['checked'] = time.time()
         rt['live'] = bool(target)
         if target:

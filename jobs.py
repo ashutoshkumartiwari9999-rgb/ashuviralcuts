@@ -7,6 +7,14 @@ import uuid
 from pathlib import Path
 from fastapi import HTTPException
 
+class _ClosingConnection(sqlite3.Connection):
+    """Make `with connect()` release the SQLite file handle as well as commit."""
+    def __exit__(self, exc_type, exc_value, traceback):
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
 class JobQueue:
     def __init__(self,path,handlers,state,autostart=True):
         self.path=Path(path);self.path.parent.mkdir(parents=True,exist_ok=True)
@@ -19,7 +27,7 @@ class JobQueue:
             self.worker=threading.Thread(target=self.run,daemon=True);self.worker.start()
 
     def connect(self):
-        db=sqlite3.connect(self.path,timeout=10);db.row_factory=sqlite3.Row;return db
+        db=sqlite3.connect(self.path,timeout=10,factory=_ClosingConnection);db.row_factory=sqlite3.Row;return db
 
     def rows(self):
         with self.connect() as db:rows=db.execute('SELECT * FROM jobs ORDER BY created DESC').fetchall()

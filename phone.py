@@ -19,7 +19,7 @@ ALLOW = (
     "/m", "/manifest.webmanifest", "/phone-icon.svg",
     "/live", "/live-active", "/library", "/media", "/text",
     "/make", "/status", "/clips", "/feedback", "/creators",
-    "/donate", "/healthz", "/assets"
+    "/donate", "/healthz", "/assets", "/storage", "/login", "/auth"
 )
 
 MAX_TRIES = 5
@@ -196,7 +196,8 @@ def attach(app, data, root):
             token(j),
             httponly=True,
             samesite="lax",
-            max_age=30 * 24 * 3600
+            max_age=30 * 24 * 3600,
+            secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto", "").split(",")[0].strip() == "https"
         )
 
         return resp

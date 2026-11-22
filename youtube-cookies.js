@@ -1,0 +1,8 @@
+(()=>{
+const file=document.getElementById('youtube-cookie-file'),status=document.getElementById('youtube-cookie-status'),note=document.getElementById('youtube-cookie-note'),clear=document.getElementById('youtube-cookie-clear');
+if(!file||!status||!note||!clear)return;
+async function refresh(){try{const response=await fetch('/youtube-cookies/status',{cache:'no-store'}),data=await response.json();if(!response.ok)throw Error(data.detail||'Could not check cookie settings.');status.textContent=data.configured?'Configured privately':'Not configured';clear.hidden=!data.configured;}catch(error){status.textContent='Status unavailable';note.textContent=error.message;}}
+file.addEventListener('change',async()=>{const chosen=file.files&&file.files[0];if(!chosen)return;note.textContent='Uploading privately…';file.disabled=true;try{if(chosen.name.toLowerCase()!=='cookies.txt')throw Error('Please choose a file named cookies.txt.');if(chosen.size>1024*1024)throw Error('The cookies.txt file must be 1 MB or smaller.');const body=new FormData();body.append('file',chosen,'cookies.txt');const response=await fetch('/youtube-cookies',{method:'POST',body}),data=await response.json();if(!response.ok)throw Error(data.detail||'Cookie upload failed.');note.textContent=data.message;await refresh();}catch(error){note.textContent=error.message;}finally{file.value='';file.disabled=false;}});
+clear.addEventListener('click',async()=>{clear.disabled=true;try{const response=await fetch('/youtube-cookies',{method:'DELETE'}),data=await response.json();if(!response.ok)throw Error(data.detail||'Could not remove saved cookies.');note.textContent=data.message;await refresh();}catch(error){note.textContent=error.message;}finally{clear.disabled=false;}});
+refresh();
+})();

@@ -95,7 +95,7 @@ def _casual(w):
 PUNCT = set('.,!?;:"()[]{}-') | {chr(c) for c in (0x27, 0x2026, 0x964, 0x965, 0x2013, 0x2014, 0x201c, 0x201d, 0x2018, 0x2019)}
 
 def to_hinglish(token):
-    """Convert one word token; Latin tokens and punctuation pass through. Keeps leading/trailing punctuation.
+    r"""Convert one word token; Latin tokens and punctuation pass through. Keeps leading/trailing punctuation.
     (Not \W: Devanagari vowel signs are marks, which Python's \w does not count as word characters.)"""
     if not DEVA.search(token): return token
     a, b = 0, len(token)

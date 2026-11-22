@@ -409,17 +409,21 @@ def attach(app, data):
         aid = uuid.uuid4().hex
         p = asset_dir(data) / (aid + ext)
         size = 0
-        with p.open('wb') as out:
-            while chunk := await file.read(1024 * 1024):
-                size += len(chunk)
-                if size > limit:
-                    out.close()
-                    p.unlink(missing_ok=True)
-                    raise HTTPException(400, 'That file is too large.')
-                out.write(chunk)
-        r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', str(p)], capture_output=True, text=True)
-        want = 'video' if kind == 'image' else 'audio'      # ffprobe reports a still image as a video stream
-        if r.returncode or want not in r.stdout:
+        try:
+            with p.open('wb') as out:
+                while chunk := await file.read(1024 * 1024):
+                    size += len(chunk)
+                    if size > limit:
+                        raise HTTPException(413, 'That file is too large.')
+                    import storage
+                    try:storage.ensure_capacity(data, len(chunk))
+                    except storage.StorageLimitError as error:raise HTTPException(507, str(error)) from error
+                    out.write(chunk)
+            r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', str(p)], capture_output=True, text=True, timeout=30)
+            want = 'video' if kind == 'image' else 'audio'      # ffprobe reports a still image as a video stream
+            if r.returncode or want not in r.stdout:
+                raise HTTPException(400, 'That is not a valid ' + kind + ' file.')
+        except Exception:
             p.unlink(missing_ok=True)
-            raise HTTPException(400, 'That is not a valid ' + kind + ' file.')
+            raise
         return {'id': aid, 'kind': kind, 'name': (file.filename or '')[:80]}

@@ -59,7 +59,7 @@ function appendVisualReview(parent,review){if(!review?.frames?.length)return;con
 function lazyVideo(v){if(lazyObserver){v.preload='none';lazyObserver.observe(v);}else v.preload='metadata';}
 async function refreshLibrary(){const clips=await request('/library');$('library-count').textContent=clips.length;const host=$('library');host.replaceChildren();if(!clips.length){const empty=document.createElement('div');empty.className='empty-library';empty.textContent='Your first clip belongs here. Export a moment to start your library.';host.append(empty);}for(const clip of clips){const card=document.createElement('article');card.className='clip-card';const video=document.createElement('video');video.src='/media/'+clip.id;video.controls=true;lazyVideo(video);const title=document.createElement('h3');title.textContent=clip.title;const meta=document.createElement('p');meta.textContent=(clip.meta.duration||0).toFixed(1)+' seconds · '+(clip.settings.layout||'stack')+' · '+new Date(clip.created*1000).toLocaleDateString();const links=document.createElement('div');links.className='card-links';const download=document.createElement('a');download.href='/media/'+clip.id;download.download='neonclipping-'+clip.id+'.mp4';download.textContent='↓ MP4';links.append(download);if(clip.srt){const sub=document.createElement('a');sub.href='/text/'+clip.id+'/srt';sub.textContent='↓ SRT';links.append(sub);}const edit=document.createElement('button');edit.textContent='Edit clip';edit.onclick=()=>openSavedClip(clip.id).catch(e=>status(e.message));links.append(edit);card.append(video,title,meta,links);appendVisualReview(card,clip.settings.visual_review);host.append(card);}}
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-view]').forEach(x=>x.classList.toggle('active',x===b));$('editor-view').hidden=b.dataset.view!=='editor';$('library-view').hidden=b.dataset.view!=='library';if(b.dataset.view==='library')refreshLibrary().catch(e=>status(e.message));});$('refresh-library').onclick=()=>refreshLibrary().catch(e=>status(e.message));
-request('/highlights').then(showHighlights).catch(e=>status(e.message));refreshLibrary().catch(e=>status(e.message));
+request('/highlights').then(showHighlights).catch(e=>status(e.message));
 
 $('make').onclick=async()=>{const url=$('url').value.trim();if(!url&&!id){status('Paste a video link or upload a file first.');return;}
  const b=$('make');b.disabled=true;$('make-results').hidden=false;$('make-results').querySelector('.star-ask')?.remove();$('make-grid').replaceChildren();$('make-progress').style.width='2%';
@@ -226,7 +226,12 @@ async function loadCreators(force){
 }
 $('creator-add').onclick=async()=>{const url=$('creator-url').value.trim();if(!url){$('creator-note').textContent='Type a Twitch name or paste a channel link first.';return;}
  try{await request('/creators',{url,...creatorOpts()});$('creator-url').value='';$('creator-note').textContent='Added. Checking if they are live…';await loadCreators(true);}catch(e){$('creator-note').textContent='⚠ '+e.message;}};
-loadCreators(true).catch(()=>{});setInterval(()=>{if(!document.hidden)loadCreators().catch(()=>{});},8000);
+let creatorFeedStarted=false,creatorPanelVisible=false;
+function startCreatorFeed(){if(creatorFeedStarted)return;creatorFeedStarted=true;loadCreators(true).catch(()=>{});setInterval(()=>{if(!document.hidden&&creatorPanelVisible)loadCreators().catch(()=>{});},8000);}
+const creatorPanel=document.querySelector('.creators-panel');
+let creatorObserver;
+if(creatorPanel&&'IntersectionObserver'in window){creatorObserver=new IntersectionObserver(entries=>{creatorPanelVisible=entries.some(entry=>entry.isIntersecting);if(creatorPanelVisible)startCreatorFeed();},{rootMargin:'250px'});creatorObserver.observe(creatorPanel);}
+else{creatorPanelVisible=true;startCreatorFeed();}
 
 $('download-bundle').onclick=async()=>{try{if(!editingClip)throw Error('Open a saved clip first.');status('Preparing this video’s saved clips — no rendering.');const result=await request('/bundles',{file:editingClip,scope:'video'});const link=$('bundle-link');link.href=result.download;link.hidden=false;link.textContent='Download '+result.clips+' clips + subtitles ZIP';status('Bundle ready. Original MP4s, subtitles and post copy are included.');}catch(e){status(e.message);}};
 

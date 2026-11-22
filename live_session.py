@@ -15,6 +15,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+import storage
 
 BUCKET = 10        # seconds per chat bucket
 HISTORY = 30       # buckets in the baseline (5 minutes)
@@ -168,8 +169,8 @@ class LiveSession:
                 import json as _json
                 title = (_json.loads(r.stdout.decode('utf-8', 'replace') or '{}').get('metadata') or {}).get('title') or ''   # utf-8, not the Windows code page
             else:
-                import yt_dlp
-                with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True, 'socket_timeout': 20}) as y:
+                import youtube_cookies
+                with youtube_cookies.youtube_dl(self.url,self.dir.parent,{'quiet': True, 'no_warnings': True, 'skip_download': True, 'noplaylist': True, 'socket_timeout': 20}) as y:
                     title = y.extract_info(self.url, download=False).get('title') or ''
             self._set(title=clean_title(title))
         except Exception:
@@ -204,6 +205,7 @@ class LiveSession:
             threading.Thread(target=self._fetch_title, daemon=True).start()
             self._set(status='recording', stage='Recording and watching chat')
             last_clip, seen = -1e9, None
+            last_storage_check = 0.0
             while not self.stop_ev.is_set() and self.proc.poll() is None:
                 time.sleep(1)
                 done_bucket = int(time.time() // BUCKET) - 1
@@ -215,6 +217,14 @@ class LiveSession:
                     self._set(status='error', error='Stopped: less than %d GB free on the disk.' % MIN_FREE_GB, stage='Disk almost full')
                     self.proc.terminate()
                     break
+                if time.monotonic() - last_storage_check >= 10:
+                    last_storage_check = time.monotonic()
+                    try:
+                        storage.ensure_capacity(self.dir.parent)
+                    except storage.StorageLimitError as error:
+                        self._set(status='error', error=str(error), stage='Storage limit reached')
+                        self.proc.terminate()
+                        break
                 cur = int(time.time() // BUCKET)
                 m30 = sum(self.counts.get(b, 0) for b in (cur - 2, cur - 1, cur))
                 hype = hype_percent(m30, self.state['baseline'], self.state['hist_n'])

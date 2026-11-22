@@ -121,4 +121,6 @@ details.panel>summary{cursor:pointer;list-style:none;font-size:16px}details.pane
 
 .transcript-passage{padding:16px;margin:12px 0;border:1px solid var(--line);border-radius:12px}.transcript-passage .chip{margin:5px}.transcript-passage .chip.active{border-color:var(--pink)}#tr-results{max-height:600px;overflow:auto}#tr-text{width:100%;box-sizing:border-box}
 
+.youtube-cookies{margin-top:14px;padding:12px;border:1px solid var(--line);border-radius:12px;background:#100d18}.youtube-cookies summary{display:flex;justify-content:space-between;gap:12px;cursor:pointer;color:var(--cyan);font-weight:700}.youtube-cookies summary span{color:var(--muted);font-size:12px;text-align:right}.youtube-cookies p{margin:12px 0;font-size:13px;line-height:1.5}.cookie-controls{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:10px 0}.youtube-cookies>small{display:block;line-height:1.5}.youtube-cookies button:disabled,.youtube-cookies input:disabled{opacity:.6;cursor:wait}
+
 .vision-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}.vision-grid figure{margin:10px 0;padding:8px;background:#100d18;border-radius:10px}.vision-grid img{width:100%;height:auto;display:block}.vision-grid figcaption{font-size:12px;line-height:1.45;color:var(--muted);margin-top:8px}
