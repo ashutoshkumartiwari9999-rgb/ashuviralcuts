@@ -46,6 +46,13 @@ def make_candidate_workers():
  """Bound parallel video decoding/downloads on memory-limited hosts."""
  try:return max(1,min(4,int(os.environ.get('NEONCLIPPING_MAKE_WORKERS','1'))))
  except (TypeError,ValueError,OverflowError):return 1
+
+def _make_failure_message(error,url):
+ """Map safe yt-dlp categories to user guidance without exposing extractor output."""
+ if url and isinstance(error,youtube_cookies.YoutubeDownloadFailure):
+  return youtube_cookies.user_error(error,url,DATA)
+ return str(error)[-600:]
+
 @app.get('/')
 def home():return HTMLResponse((ROOT/'index.html').read_text(encoding='utf-8'))
 attach(app,DATA,state,probe)
@@ -429,7 +436,7 @@ def make(b:dict):
                  'error':r.get('error'),'srt':r.get('srt'),'visual_review':c.get('visual_review')})
     save(job,{'clips':list(done),'stage':f'Rendered {i+1}/{len(found)}','progress':.6+.4*(i+1)/len(found)})
    save(job,{'status':'done','stage':'Clips ready','progress':1,'elapsed_seconds':round(time.monotonic()-began,1)})
-  except Exception as e:save(job,{'status':'error','error':str(e)[-600:]})
+  except Exception as e:save(job,{'status':'error','error':_make_failure_message(e,url)})
  threading.Thread(target=work,daemon=True).start();return {'job':job}
 LIVE={}
 

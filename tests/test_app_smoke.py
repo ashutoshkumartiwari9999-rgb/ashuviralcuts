@@ -15,6 +15,7 @@ COOKIE_SAMPLE = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147
 _TEST_DATA = tempfile.TemporaryDirectory(prefix="ashuviralcuts-test-")
 with patch.dict(os.environ, {"NEONCLIPPING_DATA_DIR": _TEST_DATA.name, "NEONCLIPPING_REQUIRE_AUTH": "0", "NEONCLIPPING_PRIVATE_COOKIE_ADMIN": "1", "NEONCLIPPING_AUTH_PASSWORD": "test-owner-password-for-cookie-tests"}, clear=False):
     import app as app_module
+    import youtube_cookies
 
 
 class AppSmokeTests(unittest.TestCase):
@@ -210,6 +211,51 @@ class AppSmokeTests(unittest.TestCase):
             finally:
                 source.unlink(missing_ok=True)
                 app_module.state.pop(clip_id, None)
+
+    def test_make_displays_sanitized_youtube_failure_categories(self):
+        """The /make job result must keep yt-dlp's safe category, never its raw output."""
+        cases = (
+            ("authentication", "rejected the session"),
+            ("po_token", "Proof-of-Origin (PO) token"),
+            ("javascript_runtime", "JavaScript challenge"),
+            ("rate_limited", "rate-limited this request"),
+            ("network", "could not complete its connection to YouTube"),
+        )
+        youtube_cookies.save_cookies(app_module.DATA, COOKIE_SAMPLE)
+        import smart  # Ensure module initialization happens before substituting the worker thread.
+
+        class InlineThread:
+            def __init__(self, target, daemon=False):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        try:
+            for category, expected in cases:
+                with self.subTest(category=category):
+                    failure = youtube_cookies.YoutubeDownloadFailure(category)
+                    failure.extractor_output = "private-cookie-value raw-yt-dlp-response"
+                    with patch.object(app_module, "_yt", side_effect=failure), \
+                         patch.object(app_module.threading, "Thread", InlineThread):
+                        result = app_module.make({
+                            "url": "https://www.youtube.com/watch?v=public-test-video",
+                            "count": 1,
+                            "min_len": 20,
+                            "max_len": 25,
+                        })
+                    job = result["job"]
+                    record = app_module.make_status(job)
+                    self.assertEqual(record.get("status"), "error", record)
+                    message = record.get("error", "")
+                    self.assertIn(expected, message)
+                    self.assertNotIn("private-cookie-value", message)
+                    self.assertNotIn("raw-yt-dlp-response", message)
+                    self.assertNotIn("YouTube download failed", message)
+                    app_module.state.pop(job, None)
+                    (app_module.DATA / f"{job}.state.json").unlink(missing_ok=True)
+        finally:
+            youtube_cookies.remove_cookies(app_module.DATA)
 
 
 if __name__ == "__main__":
