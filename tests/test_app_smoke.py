@@ -96,6 +96,55 @@ class AppSmokeTests(unittest.TestCase):
         asyncio.run(exercise())
         self.assertLess(time.monotonic()-started,2.0)
 
+    def test_make_local_source_does_not_shadow_curation(self):
+        """Regression: /make must use module-level curation before lazy imports."""
+        source_id = "makeregressionsource"
+        source = app_module.DATA / f"{source_id}.mp4"
+        source.write_bytes(b"test source placeholder")
+        clip_id = "makeregressionexport"
+        candidate = {
+            "start": 1.0, "end": 8.0, "score": 70, "rank": 0.7,
+            "title": "Regression clip", "hook": "", "reason": "test",
+            "words": [{"start": 1.1, "end": 1.4, "text": "hello"}],
+            "features": {},
+        }
+
+        def completed_export(_body):
+            app_module.state[clip_id] = {"status": "done", "meta": {"duration": 7.0}}
+            return {"job": clip_id}
+
+        with patch.object(app_module, "probe", return_value={"w": 320, "h": 240, "duration": 12.0}), \
+             patch("transcripts.cached_source", return_value=None), \
+             patch("learn.load_weights", return_value={}), \
+             patch("action.analyze", return_value={"motion": 0.5, "flash": 0, "strobe": 0, "cuts": 0}), \
+             patch.object(app_module, "large_v3", return_value=None), \
+             patch.object(app_module, "transcribe", return_value={"words": [{"start": 1.1, "end": 1.4, "text": "hello"}]}), \
+             patch.object(app_module, "export", side_effect=completed_export), \
+             patch.dict(app_module.state, {clip_id: {"status": "running"}}):
+            async def exercise():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_module.app), base_url="http://testserver") as client:
+                    response = await client.post("/make", json={
+                        "id": source_id, "count": 1, "min_len": 5, "max_len": 10,
+                        "moments": [{"start": 1, "end": 8, "title": "Regression clip", "hook": "Test hook"}],
+                    })
+                    self.assertEqual(response.status_code, 200, response.text)
+                    job = response.json()["job"]
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        record = app_module.state.get(job, {})
+                        if record.get("status") != "running":
+                            break
+                        await asyncio.sleep(0.02)
+                    self.assertEqual(record.get("status"), "done", record)
+                    self.assertEqual(len(record.get("clips", [])), 1)
+                    self.assertNotIn("curation", record.get("error", ""))
+
+            try:
+                asyncio.run(exercise())
+            finally:
+                source.unlink(missing_ok=True)
+                app_module.state.pop(clip_id, None)
+
 
 if __name__ == "__main__":
     unittest.main()

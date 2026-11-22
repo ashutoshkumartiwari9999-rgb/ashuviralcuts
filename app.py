@@ -382,7 +382,7 @@ def make(b:dict):
    for i,c in enumerate(found):
     if not moments:
      try:
-      import smart, curation
+      import smart
       model=smart._model(profile!='action' or mode=='deep')
       if model and c.get('transcript'):
        save(job,{'stage':f'Writing opening heading {i+1}/{len(found)}'})
