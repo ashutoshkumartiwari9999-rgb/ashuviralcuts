@@ -42,6 +42,10 @@ def probe(p):
  r=subprocess.run(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(p)],capture_output=True,text=True,check=True)
  j=json.loads(r.stdout);v=next(x for x in j['streams'] if x['codec_type']=='video')
  return {'w':v['width'],'h':v['height'],'duration':float(j['format']['duration'])}
+def make_candidate_workers():
+ """Bound parallel video decoding/downloads on memory-limited hosts."""
+ try:return max(1,min(4,int(os.environ.get('NEONCLIPPING_MAKE_WORKERS','1'))))
+ except (TypeError,ValueError,OverflowError):return 1
 @app.get('/')
 def home():return HTMLResponse((ROOT/'index.html').read_text(encoding='utf-8'))
 attach(app,DATA,state,probe)
@@ -321,7 +325,7 @@ def make(b:dict):
      except Exception as e:c['_act']=None;c['reason']=c.get('reason','')+' (no action check)'
      finally:
       if tmp:Path(tmp).unlink(missing_ok=True)
-    with _TP(max_workers=4) as ex:list(ex.map(one,top))
+    with _TP(max_workers=make_candidate_workers()) as ex:list(ex.map(one,top))
     for key in ('motion','flash','strobe','cuts'):
      vals=[c['_act'][key] for c in top if c.get('_act')]
      if not vals:continue
@@ -366,7 +370,7 @@ def make(b:dict):
      with _yt({'format':'bv*[height<=720][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=720]+ba/b[height<=720]/b','merge_output_format':'mp4','outtmpl':str(DATA/(name+'.%(ext)s')),
                'download_ranges':download_range_func(None,[(max(0,c['start']-PAD),c['end']+1)])},url) as y:y.download([url])
      return name
-    pool=ThreadPoolExecutor(max_workers=3);sections=[pool.submit(section,i,c) for i,c in enumerate(found)]
+    pool=ThreadPoolExecutor(max_workers=make_candidate_workers());sections=[pool.submit(section,i,c) for i,c in enumerate(found)]
    else:
     if url:
      save(job,{'stage':'Downloading source','progress':.02});sid,p=app.neon['download'](url,job)

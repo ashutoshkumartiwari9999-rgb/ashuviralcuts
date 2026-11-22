@@ -30,3 +30,5 @@ services:
         value: "96"
       - key: NEONCLIPPING_MAX_UPLOAD_MB
         value: "300"
+      - key: NEONCLIPPING_MAKE_WORKERS
+        value: "1"

@@ -84,6 +84,17 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(variables["NEONCLIPPING_PRIVATE_COOKIE_ADMIN"]["value"], "1")
         self.assertEqual(variables["NEONCLIPPING_PUBLIC_MODE"]["value"], "1")
         self.assertTrue(variables["NEONCLIPPING_AUTH_PASSWORD"]["sync"] is False)
+        self.assertEqual(variables["NEONCLIPPING_MAKE_WORKERS"]["value"], "1")
+
+    def test_make_worker_limit_is_bounded_and_safe_by_default(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(app_module.make_candidate_workers(), 1)
+        with patch.dict(os.environ, {"NEONCLIPPING_MAKE_WORKERS": "4"}, clear=False):
+            self.assertEqual(app_module.make_candidate_workers(), 4)
+        with patch.dict(os.environ, {"NEONCLIPPING_MAKE_WORKERS": "99"}, clear=False):
+            self.assertEqual(app_module.make_candidate_workers(), 4)
+        with patch.dict(os.environ, {"NEONCLIPPING_MAKE_WORKERS": "not-a-number"}, clear=False):
+            self.assertEqual(app_module.make_candidate_workers(), 1)
 
     def test_startup_lifespan_keeps_health_check_lightweight(self):
         async def exercise():

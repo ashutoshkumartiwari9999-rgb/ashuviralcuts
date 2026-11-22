@@ -98,6 +98,7 @@ Free web services may spin down after inactivity, take time to wake up, and have
 | `NEONCLIPPING_AUTH_PASSWORD` | unset | Secret used for private YouTube cookie management; never put it in source control |
 | `NEONCLIPPING_LAN` | unset | Set to `1` to enable same-Wi-Fi phone remote on local runs |
 | `NEONCLIPPING_MAX_UPLOAD_MB` | `300` | Main video upload limit, clamped to 10–700 MB |
+| `NEONCLIPPING_MAKE_WORKERS` | `1` | Maximum parallel candidate video operations; Render Free sets `1` to limit peak memory |
 | `NEONCLIPPING_STORAGE_BUDGET_MB` | `800` | Managed data-folder budget, clamped to 128–1024 MB |
 | `NEONCLIPPING_STORAGE_RESERVE_MB` | `96` | Free-space safety margin, clamped to 32–512 MB |
 | `NEONCLIPPING_DONATE_RAZORPAY` | unset | Optional HTTPS donation URL |
