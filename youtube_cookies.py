@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import tempfile
 import threading
+import time
 from urllib.parse import urlparse
 
 
@@ -31,6 +32,7 @@ def validate_cookie_text(raw: bytes) -> str:
         raise ValueError("Save cookies.txt as UTF-8 Netscape format, then upload it again.") from error
 
     youtube_cookie = False
+    live_youtube_cookie = False
     has_cookie = False
     for line in text.splitlines():
         if not line or line.startswith("#") and not line.startswith("#HttpOnly_"):
@@ -44,10 +46,14 @@ def validate_cookie_text(raw: bytes) -> str:
         if not fields[4].isdigit():
             raise ValueError("This cookies.txt file has an invalid expiration field.")
         has_cookie = True
-        youtube_cookie |= domain == "youtube.com" or domain.endswith(".youtube.com") or domain == "youtu.be"
+        is_youtube_cookie = domain == "youtube.com" or domain.endswith(".youtube.com") or domain == "youtu.be"
+        youtube_cookie |= is_youtube_cookie
+        live_youtube_cookie |= is_youtube_cookie and (fields[4] == "0" or int(fields[4]) > time.time())
 
     if not has_cookie or not youtube_cookie:
         raise ValueError("The cookies file must contain at least one YouTube cookie.")
+    if not live_youtube_cookie:
+        raise ValueError("All YouTube cookies in this file have expired. Export a fresh cookies.txt while signed in to YouTube.")
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
@@ -61,6 +67,38 @@ def has_cookies(data_dir: Path) -> bool:
         return path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+def cookie_state(data_dir: Path | None, now: float | None = None) -> str:
+    """Return only non-sensitive cookie availability/expiry metadata."""
+    if data_dir is None:
+        return "unknown"
+    path = cookie_path(data_dir)
+    try:
+        if not path.is_file() or path.stat().st_size == 0:
+            return "missing"
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return "unavailable"
+    timestamp = time.time() if now is None else now
+    youtube_expiries = []
+    for line in text.splitlines():
+        if not line or line.startswith("#") and not line.startswith("#HttpOnly_"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 7:
+            continue
+        domain = fields[0].removeprefix("#HttpOnly_").lower().lstrip(".")
+        if domain == "youtube.com" or domain.endswith(".youtube.com") or domain == "youtu.be":
+            try:
+                expiry = int(fields[4])
+            except ValueError:
+                continue
+            # Expiry 0 is a browser-session cookie; it has no fixed timestamp.
+            if expiry == 0 or expiry > timestamp:
+                return "available"
+            youtube_expiries.append(expiry)
+    return "expired" if youtube_expiries else "unavailable"
 
 
 def save_cookies(data_dir: Path, raw: bytes) -> None:
@@ -117,17 +155,24 @@ def youtube_dl(url: str, data_dir: Path, options: dict):
             with yt_dlp.YoutubeDL(configured) as downloader:
                 yield downloader
         except Exception as error:
-            raise RuntimeError(user_error(error, url)) from None
+            raise RuntimeError(user_error(error, url, data_dir)) from None
     finally:
         if temp_cookie:
             temp_cookie.unlink(missing_ok=True)
 
 
-def user_error(error: BaseException, url: str) -> str:
+def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> str:
     """Do not expose extractor internals for YouTube; show actionable cookie guidance."""
     if not is_youtube_url(url):
         return str(error)[-700:]
     message = str(error).lower()
     if any(term in message for term in ("sign in to confirm", "not a bot", "cookies", "login required", "authentication", "confirm your age")):
-        return "YouTube needs a signed-in browser session. In Bring your video → YouTube cookies, upload a fresh Netscape-format cookies.txt exported while signed in to YouTube, then retry. Keep that file private."
-    return "YouTube could not download this video. Check that the link is public and try again. If YouTube asks you to sign in, upload a fresh cookies.txt in Bring your video → YouTube cookies."
+        status = cookie_state(data_dir)
+        if status == "missing":
+            return "YouTube needs a signed-in browser session, but no cookies are configured on this server. Sign in to YouTube, export a fresh Netscape-format cookies.txt, and upload it under Bring your video → YouTube cookies."
+        if status == "expired":
+            return "The saved YouTube cookies have expired. Sign in to YouTube again, export a fresh Netscape-format cookies.txt, and replace them under Bring your video → YouTube cookies."
+        if status == "unavailable":
+            return "The saved YouTube cookies are unreadable or invalid. Export a fresh Netscape-format cookies.txt while signed in to YouTube and replace them under Bring your video → YouTube cookies."
+        return "YouTube rejected the saved cookies. They may be expired, revoked, or incomplete. Export a fresh Netscape-format cookies.txt while signed in to YouTube and replace them under Bring your video → YouTube cookies."
+    return "YouTube could not download this video. Check that the link is public and try again. If it requires sign-in, configure a valid signed-in YouTube cookies.txt in Bring your video → YouTube cookies."

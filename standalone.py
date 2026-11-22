@@ -64,7 +64,7 @@ def attach(app,DATA,state,probe):
         try:
             with youtube_cookies.youtube_dl(url,DATA,options) as downloader:downloader.download([url])
         except Exception as error:
-            raise RuntimeError(youtube_cookies.user_error(error,url)) from None
+            raise RuntimeError(youtube_cookies.user_error(error,url,DATA)) from None
         src=next((p for p in directory.iterdir() if p.suffix in ('.mp4','.mkv','.webm')),None)
         if src is None:raise RuntimeError('Download produced no playable file. Upload the original MP4 instead.')
         if src.suffix=='.mp4':shutil.move(str(src),str(target))
@@ -122,12 +122,12 @@ def attach(app,DATA,state,probe):
         job=uuid.uuid4().hex;save(job,{'status':'running','stage':'Import starting','message':'Getting preview frames; download runs in background','preview_status':'loading','url':url})
         def preview_work():
             try:prepare(url,job,DATA,probe,lambda fields:save(job,fields))
-            except Exception as error:save(job,{'preview_status':'unavailable','preview_error':'Early frames unavailable; full download continues. '+youtube_cookies.user_error(error,url)})
+            except Exception as error:save(job,{'preview_status':'unavailable','preview_error':'Early frames unavailable; full download continues. '+youtube_cookies.user_error(error,url,DATA)})
         threading.Thread(target=preview_work,daemon=True).start()
         def work():
             try:
                 id,p=download(url,job);save(job,{'status':'done','id':id,**probe(p)})
-            except Exception as error:save(job,{'status':'error','error':'Import failed. '+youtube_cookies.user_error(error,url)})
+            except Exception as error:save(job,{'status':'error','error':'Import failed. '+youtube_cookies.user_error(error,url,DATA)})
         threading.Thread(target=work,daemon=True).start();return {'job':job}
 
     @app.get('/preview/{job}/{index}')
@@ -158,7 +158,7 @@ def attach(app,DATA,state,probe):
                 save(job,{'id':job,'status':'done','stage':'Candidates ready','progress':1,'source_id':source_id,'source':{'url':url},
                           'title':'Imported video' if url else 'Uploaded video','clips':clips,'engine':engine,
                           'elapsed_seconds':round(time.monotonic()-began,2),'meta':meta})
-            except Exception as error:save(job,{'id':job,'status':'error','error':youtube_cookies.user_error(error,url) if url else str(error)[-700:]})
+            except Exception as error:save(job,{'id':job,'status':'error','error':youtube_cookies.user_error(error,url,DATA) if url else str(error)[-700:]})
         threading.Thread(target=work,daemon=True).start();return {'job':job}
 
     @app.get('/analysis/{job}')

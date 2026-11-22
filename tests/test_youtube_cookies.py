@@ -22,6 +22,38 @@ class YoutubeCookieTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "YouTube"):
             youtube_cookies.validate_cookie_text(twitch)
 
+    def test_expired_youtube_cookies_are_rejected_at_upload(self):
+        expired = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1\tSID\tprivate-value\n"
+        with self.assertRaisesRegex(ValueError, "expired"):
+            youtube_cookies.validate_cookie_text(expired)
+
+    def test_cookie_state_reports_only_presence_and_expiration(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self.assertEqual(youtube_cookies.cookie_state(root, now=100), "missing")
+            path = youtube_cookies.cookie_path(root)
+            path.write_bytes(SAMPLE)
+            self.assertEqual(youtube_cookies.cookie_state(root, now=100), "available")
+            path.write_text("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1\tSID\tprivate-value\n", encoding="utf-8")
+            self.assertEqual(youtube_cookies.cookie_state(root, now=100), "expired")
+
+    def test_auth_errors_distinguish_missing_expired_and_rejected_cookies(self):
+        auth_error = RuntimeError("Sign in to confirm you're not a bot; do not echo this private-cookie-value")
+        url = "https://www.youtube.com/watch?v=abc"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            missing = youtube_cookies.user_error(auth_error, url, root)
+            self.assertIn("no cookies are configured", missing)
+            path = youtube_cookies.cookie_path(root)
+            path.write_text("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1\tSID\tprivate-cookie-value\n", encoding="utf-8")
+            expired = youtube_cookies.user_error(auth_error, url, root)
+            self.assertIn("have expired", expired)
+            self.assertNotIn("private-cookie-value", expired)
+            path.write_bytes(SAMPLE)
+            rejected = youtube_cookies.user_error(auth_error, url, root)
+            self.assertIn("rejected", rejected)
+            self.assertNotIn("private-cookie-value", rejected)
+
     def test_cookie_copy_is_private_and_removed_after_ytdlp_job(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
