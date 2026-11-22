@@ -95,6 +95,61 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(status, 429)
         asyncio.run(exercise())
 
+    def test_public_mode_keeps_clipping_open_and_cookie_settings_private(self):
+        password = "a-strong-test-password-2026"
+        with patch.dict(os.environ, {
+            "NEONCLIPPING_REQUIRE_AUTH": "0",
+            "NEONCLIPPING_PRIVATE_COOKIE_ADMIN": "1",
+            "NEONCLIPPING_AUTH_PASSWORD": password,
+        }):
+            app = self.make_app()
+
+        async def exercise():
+            status, _, body = await asgi_request(app, "/auth/status")
+            self.assertEqual(status, 200)
+            state = json.loads(body)
+            self.assertFalse(state["required"])
+            self.assertTrue(state["cookie_admin_required"])
+            status, _, _ = await asgi_request(app, "/private", headers={"accept": "application/json"})
+            self.assertEqual(status, 200)
+            status, _, _ = await asgi_request(app, "/youtube-cookies/status", headers={"accept": "application/json"})
+            self.assertEqual(status, 401)
+            status, _, _ = await asgi_request(
+                app, "/private", "POST", b"{}",
+                {"origin": "https://attacker.invalid", "content-type": "application/json"},
+            )
+            self.assertEqual(status, 403)
+            body = json.dumps({"password": password}).encode()
+            status, headers, _ = await asgi_request(app, "/auth/login", "POST", body, {"content-type": "application/json"})
+            self.assertEqual(status, 200)
+            cookie = headers[b"set-cookie"].decode().split(";", 1)[0]
+            status, _, _ = await asgi_request(app, "/youtube-cookies/status", headers={"cookie": cookie})
+            self.assertEqual(status, 200)
+
+        asyncio.run(exercise())
+
+    def test_public_write_rate_limits_expensive_uploads(self):
+        with patch.dict(os.environ, {"NEONCLIPPING_REQUIRE_AUTH": "0"}, clear=False):
+            app = FastAPI()
+
+            @app.post("/upload")
+            async def upload():
+                return {"ok": True}
+
+            security.attach(app)
+
+        async def exercise():
+            limit = security.RATE_LIMITS["/upload"][0]
+            for _ in range(limit):
+                status, _, _ = await asgi_request(app, "/upload", "POST", b"{}")
+                self.assertEqual(status, 200)
+            status, headers, body = await asgi_request(app, "/upload", "POST", b"{}")
+            self.assertEqual(status, 429)
+            self.assertIn(b"Too many requests", body)
+            self.assertIn(b"retry-after", headers)
+
+        asyncio.run(exercise())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,6 +1,7 @@
 from pathlib import Path
 from urllib.parse import urlparse
 import json
+import os
 import uuid
 import threading
 import shutil
@@ -40,12 +41,13 @@ def attach(app,DATA,state,probe):
         return p
     def download(url,job):
         # Reuse only this app's own import cache. Never read another app's data.
-        for f in DATA.glob('*.request.json'):
-            try:
-                if json.loads(f.read_text()).get('url')==url:
-                    cached=DATA/(f.name.split('.')[0]+'.mp4')
-                    if cached.exists():probe(cached);return cached.stem,cached
-            except (OSError,ValueError,subprocess.SubprocessError):pass
+        if os.environ.get('NEONCLIPPING_PUBLIC_MODE') != '1':
+            for f in DATA.glob('*.request.json'):
+                try:
+                    if json.loads(f.read_text()).get('url')==url:
+                        cached=DATA/(f.name.split('.')[0]+'.mp4')
+                        if cached.exists():probe(cached);return cached.stem,cached
+                except (OSError,ValueError,subprocess.SubprocessError):pass
         try:storage.ensure_capacity(DATA,64*storage.MIB)
         except storage.StorageLimitError as error:raise HTTPException(507,str(error)) from error
         directory=DATA/job;directory.mkdir(exist_ok=True)

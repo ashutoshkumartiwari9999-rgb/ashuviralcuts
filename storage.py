@@ -11,6 +11,20 @@ MIB = 1024 * 1024
 DEFAULT_BUDGET = 800 * MIB
 DEFAULT_RESERVE = 96 * MIB
 DEFAULT_UPLOAD_LIMIT = 300 * MIB
+_ADMIN_LIMITS: dict[str, int | None] = {"upload_mb": None, "budget_mb": None, "reserve_mb": None}
+
+
+def set_admin_limits(upload_mb: int | None, budget_mb: int | None, reserve_mb: int | None) -> None:
+    """Apply owner-controlled limits for this process; None falls back to environment defaults."""
+    try:
+        upload_mb = None if upload_mb is None else max(10, min(700, int(upload_mb)))
+        budget_mb = None if budget_mb is None else max(128, min(1024, int(budget_mb)))
+        reserve_mb = None if reserve_mb is None else max(32, min(512, int(reserve_mb)))
+    except (TypeError, ValueError, OverflowError):
+        upload_mb = budget_mb = reserve_mb = None
+    if budget_mb is not None and reserve_mb is not None and reserve_mb >= budget_mb:
+        upload_mb = budget_mb = reserve_mb = None
+    _ADMIN_LIMITS.update(upload_mb=upload_mb, budget_mb=budget_mb, reserve_mb=reserve_mb)
 
 
 class StorageLimitError(Exception):
@@ -90,16 +104,19 @@ def _env_int(name: str, default: int, minimum: int, maximum: int) -> int:
 
 
 def budget_bytes() -> int:
-    return _env_int("NEONCLIPPING_STORAGE_BUDGET_MB", 800, 128, 1024) * MIB
+    value = _ADMIN_LIMITS["budget_mb"]
+    return (value if value is not None else _env_int("NEONCLIPPING_STORAGE_BUDGET_MB", 800, 128, 1024)) * MIB
 
 
 def reserve_bytes() -> int:
-    return _env_int("NEONCLIPPING_STORAGE_RESERVE_MB", 96, 32, 512) * MIB
+    value = _ADMIN_LIMITS["reserve_mb"]
+    return (value if value is not None else _env_int("NEONCLIPPING_STORAGE_RESERVE_MB", 96, 32, 512)) * MIB
 
 
 def upload_limit_bytes() -> int:
     # Leave room for source, generated clips, and working files on a 1 GB disk.
-    return _env_int("NEONCLIPPING_MAX_UPLOAD_MB", 300, 10, 700) * MIB
+    value = _ADMIN_LIMITS["upload_mb"]
+    return (value if value is not None else _env_int("NEONCLIPPING_MAX_UPLOAD_MB", 300, 10, 700)) * MIB
 
 
 def used_bytes(root: Path) -> int:

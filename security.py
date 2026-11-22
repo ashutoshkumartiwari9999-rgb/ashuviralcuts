@@ -6,6 +6,8 @@ import html
 import os
 import secrets
 import time
+from collections import deque
+from math import ceil
 from urllib.parse import quote
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -14,6 +16,17 @@ COOKIE = "nc_session"
 SESSION_SECONDS = 12 * 60 * 60
 LOGIN_WINDOW_SECONDS = 10 * 60
 MAX_LOGIN_TRIES = 5
+DEFAULT_WRITE_LIMIT = (180, 60)
+RATE_LIMITS = {
+    "/upload": (8, 10 * 60),
+    "/link": (8, 10 * 60),
+    "/analyze": (8, 10 * 60),
+    "/make": (8, 10 * 60),
+    "/export": (16, 10 * 60),
+    "/transcribe": (6, 60 * 60),
+    "/youtube-cookies": (5, 60 * 60),
+    "/upload-asset": (20, 10 * 60),
+}
 
 LOGIN_HTML = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="dark"><title>Sign in · AshuViralCuts</title>
@@ -31,6 +44,9 @@ form.addEventListener('submit',async event=>{event.preventDefault();message.text
 def attach(app: FastAPI) -> None:
     password = os.environ.get("NEONCLIPPING_AUTH_PASSWORD", "")
     required = os.environ.get("NEONCLIPPING_REQUIRE_AUTH") == "1"
+    cookie_admin_required = (
+        bool(password) or os.environ.get("NEONCLIPPING_PRIVATE_COOKIE_ADMIN") == "1"
+    )
     if required and not password:
         raise RuntimeError("Set NEONCLIPPING_AUTH_PASSWORD in the hosting environment before starting this public service.")
     if required and len(password) < 16:
@@ -38,6 +54,7 @@ def attach(app: FastAPI) -> None:
 
     sessions: dict[str, float] = {}
     attempts: dict[str, tuple[int, float]] = {}
+    writes: dict[tuple[str, str], deque[float]] = {}
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page():
@@ -47,12 +64,25 @@ def attach(app: FastAPI) -> None:
     async def auth_status(request: Request):
         session = request.cookies.get(COOKIE, "")
         expiry = sessions.get(session, 0)
-        return {"required": required, "authenticated": (not required) or expiry > time.time()}
+        signed_in = expiry > time.time()
+        return {
+            "required": required,
+            "authenticated": (not required) or signed_in,
+            "cookie_admin_required": cookie_admin_required,
+            "cookie_admin_authenticated": signed_in and bool(password),
+            "owner_admin_required": True,
+            "owner_admin_authenticated": signed_in and bool(password),
+        }
 
     @app.post("/auth/login")
     async def login(request: Request):
-        if not required:
+        if not required and not cookie_admin_required:
             return {"ok": True}
+        if not password:
+            return JSONResponse(
+                {"detail": "Private YouTube cookie management is not configured."},
+                status_code=503,
+            )
         host = request.client.host if request.client else "unknown"
         now = time.time()
         count, started = attempts.get(host, (0, now))
@@ -88,13 +118,23 @@ def attach(app: FastAPI) -> None:
     async def protect(request: Request, call_next):
         path = request.url.path
         public = path in {"/login", "/auth/login", "/auth/status", "/healthz"}
+        owner_admin_route = path == "/admin" or path.startswith("/admin/")
+        cookie_admin_route = path in {"/youtube-cookies", "/youtube-cookies/status"}
+        if owner_admin_route and not password:
+            return JSONResponse(
+                {"detail": "Owner Admin is unavailable until its password is configured."},
+                status_code=503,
+            )
         token = request.cookies.get(COOKIE, "")
         expiry = sessions.get(token, 0)
-        authenticated = (not required) or expiry > time.time()
+        signed_in = expiry > time.time()
+        request.state.owner_admin_authenticated = signed_in and bool(password)
+        needs_session = required or owner_admin_route or (cookie_admin_route and cookie_admin_required)
+        authenticated = (not needs_session) or signed_in
         if token and expiry and expiry <= time.time():
             sessions.pop(token, None)
 
-        if required and not public and not authenticated:
+        if needs_session and not public and not authenticated:
             accepts_html = "text/html" in request.headers.get("accept", "")
             if request.method == "GET" and accepts_html:
                 target = request.url.path
@@ -103,8 +143,9 @@ def attach(app: FastAPI) -> None:
                 return RedirectResponse("/login?next=" + quote(target, safe="/?=&%"), status_code=303, headers={"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "strict-origin-when-cross-origin"})
             return JSONResponse({"detail": "Sign in to use AshuViralCuts."}, status_code=401, headers={"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "Referrer-Policy": "strict-origin-when-cross-origin"})
 
-        # SameSite cookies plus origin validation protect state-changing requests.
-        if required and authenticated and request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        # Reject cross-origin writes even in public mode so visitors cannot be
+        # tricked into spending another user's processing or storage budget.
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
             origin = request.headers.get("origin")
             if origin:
                 expected_host = request.headers.get("host", "")
@@ -112,6 +153,37 @@ def attach(app: FastAPI) -> None:
                 scheme = forwarded_proto or request.url.scheme
                 if origin.rstrip("/") != f"{scheme}://{expected_host}".rstrip("/"):
                     return JSONResponse({"detail": "Cross-site request blocked."}, status_code=403)
+
+            host = request.client.host if request.client else "unknown"
+            route_key = path
+            if path.startswith("/live/"):
+                route_key = "/live"
+            elif path.startswith("/creators/"):
+                route_key = "/creators/item"
+            elif path.startswith("/transcripts/"):
+                route_key = "/transcripts"
+
+            now = time.monotonic()
+            checks = [("*", DEFAULT_WRITE_LIMIT)]
+            if route_key in RATE_LIMITS:
+                checks.append((route_key, RATE_LIMITS[route_key]))
+            for bucket_name, (maximum, window) in checks:
+                bucket = writes.setdefault((host, bucket_name), deque())
+                while bucket and now - bucket[0] >= window:
+                    bucket.popleft()
+                if len(bucket) >= maximum:
+                    retry_after = max(1, ceil(window - (now - bucket[0])))
+                    return JSONResponse(
+                        {"detail": "Too many requests. Please wait and try again."},
+                        status_code=429,
+                        headers={"Retry-After": str(retry_after)},
+                    )
+                bucket.append(now)
+
+            if len(writes) > 5000:
+                for key, bucket in list(writes.items()):
+                    if not bucket or now - bucket[-1] >= 60 * 60:
+                        writes.pop(key, None)
 
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")

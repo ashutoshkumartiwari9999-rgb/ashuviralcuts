@@ -89,7 +89,7 @@ def media(id:str):
  return FileResponse(p,media_type='video/mp4')
 @app.get('/assets/{name}')
 def assets(name:str):
- if name not in ('app.js','style.css','extras.js','transcripts.js','vision.js','security.js','storage.js','mobile.js','youtube-cookies.js'):raise HTTPException(404)
+ if name not in ('app.js','style.css','extras.js','transcripts.js','vision.js','security.js','storage.js','mobile.js','youtube-cookies.js','admin.js'):raise HTTPException(404)
  return FileResponse(ROOT/name,headers={'Cache-Control':'public, max-age=300'})
 @app.get('/text/{id}/{kind}')
 def text_file(id:str,kind:str):
@@ -604,6 +604,12 @@ vision.attach(app,DATA,state,probe)
 
 import creators
 creators.attach(app,DATA,LIVE,lambda target,opts,cid:start_live(target,opts,cid))
+
+import owner_admin
+owner_admin.attach(app,DATA,state)
+
+import privacy
+privacy.attach(app,DATA)
 
 import security
 security.attach(app)

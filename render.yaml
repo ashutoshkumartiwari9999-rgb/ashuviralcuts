@@ -17,6 +17,10 @@ services:
       - key: NEONCLIPPING_DATA_DIR
         value: /tmp/ashuviralcuts_data
       - key: NEONCLIPPING_REQUIRE_AUTH
+        value: "0"
+      - key: NEONCLIPPING_PRIVATE_COOKIE_ADMIN
+        value: "1"
+      - key: NEONCLIPPING_PUBLIC_MODE
         value: "1"
       - key: NEONCLIPPING_AUTH_PASSWORD
         sync: false

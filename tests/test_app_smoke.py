@@ -43,6 +43,7 @@ class AppSmokeTests(unittest.TestCase):
                         self.assertIn("Phone Remote", phone.text)
                         self.assertEqual((await client.get("/assets/mobile.js")).status_code, 200)
                         self.assertEqual((await client.get("/assets/security.js")).status_code, 200)
+                        self.assertEqual((await client.get("/assets/admin.js")).status_code, 200)
                         self.assertEqual((await client.get("/assets/storage.js")).status_code, 200)
                         cached_asset=await client.get("/assets/youtube-cookies.js")
                         self.assertEqual(cached_asset.status_code, 200)
@@ -50,6 +51,10 @@ class AppSmokeTests(unittest.TestCase):
                         health=await client.get("/healthz")
                         self.assertEqual(health.status_code, 200)
                         self.assertTrue(health.json()["ok"])
+                        auth_state=await client.get("/auth/status")
+                        self.assertEqual(auth_state.status_code,200)
+                        self.assertFalse(auth_state.json()["required"])
+                        self.assertEqual((await client.get("/public-settings")).status_code,200)
                         cookies = await client.post("/youtube-cookies",files={"file":("cookies.txt",COOKIE_SAMPLE,"text/plain")})
                         self.assertEqual(cookies.status_code,200,cookies.text)
                         self.assertNotIn("private-cookie-value",cookies.text)
@@ -75,7 +80,9 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(service["plan"], "free")
         self.assertNotIn("disk", service)
         variables = {item.get("key"): item for item in service["envVars"] if item.get("key")}
-        self.assertEqual(variables["NEONCLIPPING_REQUIRE_AUTH"]["value"], "1")
+        self.assertEqual(variables["NEONCLIPPING_REQUIRE_AUTH"]["value"], "0")
+        self.assertEqual(variables["NEONCLIPPING_PRIVATE_COOKIE_ADMIN"]["value"], "1")
+        self.assertEqual(variables["NEONCLIPPING_PUBLIC_MODE"]["value"], "1")
         self.assertTrue(variables["NEONCLIPPING_AUTH_PASSWORD"]["sync"] is False)
 
     def test_startup_lifespan_keeps_health_check_lightweight(self):

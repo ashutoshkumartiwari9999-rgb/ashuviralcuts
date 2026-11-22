@@ -1,6 +1,6 @@
 # AshuViralCuts
 
-AshuViralCuts is a self-hosted video clipping studio for turning long gaming videos and streams into short, captioned clips. The app has a FastAPI/Python backend, a responsive browser editor, and FFmpeg-based rendering. It can run locally or as a protected Render web service.
+AshuViralCuts is a self-hosted video clipping studio for turning long gaming videos and streams into short, captioned clips. The app has a FastAPI/Python backend, a responsive browser editor, and FFmpeg-based rendering. The Render deployment is public; local deployments can enable a site-wide password gate.
 
 ## What it can do
 
@@ -16,6 +16,7 @@ AshuViralCuts is a self-hosted video clipping studio for turning long gaming vid
 - Queue or schedule batch jobs, pause waiting work, and retry failed or interrupted jobs.
 - Record Twitch or YouTube live sessions and clip chat spikes. Save creators to watch for streams and start clipping automatically.
 - Use the phone remote on the same Wi-Fi network for live controls, quick clip jobs, and saved clip playback.
+- Open a separate owner-only Admin Panel for job queue actions, upload management, storage cleanup, errors, maintenance mode, and resource limits.
 
 ## Requirements
 
@@ -43,7 +44,17 @@ Local mode does not require a password unless `NEONCLIPPING_REQUIRE_AUTH=1` is s
 
 ## Authentication and security
 
-Public deployments require `NEONCLIPPING_REQUIRE_AUTH=1` and `NEONCLIPPING_AUTH_PASSWORD`. The password must be at least 16 characters. Render reads the secret from its Environment settings; it is intentionally not stored in this repository. The app uses a short-lived, HTTP-only, SameSite session cookie, limits failed sign-in attempts, checks request origins for state-changing requests, and sets browser security headers. Sign-in sessions expire after 12 hours or when the server restarts.
+The Render deployment is public and does not require visitors to sign in. Uploads and processing remain protected by per-request size and storage quotas, per-IP request limits for expensive operations, cross-site write checks, and browser security headers. YouTube cookie management stays private: sign in at `/login` with the hosting-only `NEONCLIPPING_AUTH_PASSWORD` to upload or remove the shared cookie file. If that secret is missing, cookie management fails closed while public clipping remains available. Cookie settings use a short-lived, HTTP-only, SameSite session cookie and failed sign-in limits. For local or private deployments, set `NEONCLIPPING_REQUIRE_AUTH=1` and a `NEONCLIPPING_AUTH_PASSWORD` of at least 16 characters to require sign-in for the entire site.
+
+Public browser sessions receive a random, HTTP-only visitor cookie. Video IDs, job IDs, saved-library results, queue rows, live sessions, previews, transcripts, and bundle downloads are scoped to that browser session. Cross-session media requests return `404`; the private owner registry is stored in the app data directory and never served by a public route. Public mode disables cross-visitor reuse of downloaded video cache files.
+
+### Owner Admin Panel
+
+Open `/admin` and sign in with the owner password stored in the host's environment settings. Public visitors can still open the normal studio, but the Admin Panel and its API return an authentication challenge until the owner session is valid. The panel can review and pause/restart eligible queued jobs, inspect or explicitly delete selected saved video files, clear only old temporary files, review processing errors, set a public notice or maintenance mode, and tune the upload/storage caps. Running work is preserved; only waiting jobs can be canceled by the queue controls. Cookie management uses the same owner-only session. The panel never displays the configured password.
+
+Admin settings are saved under the app's data directory. On Render Free that directory is temporary, so admin settings, uploaded media, and clips may reset after a sleep, restart, or redeploy. Runtime rate counters also reset when the process restarts.
+
+The per-process write limit is 180 requests per IP per minute. More expensive routes have tighter windows: uploads, imports, analysis, and clip creation allow 8 requests per 10 minutes; exports allow 16 per 10 minutes; transcription allows 6 per hour; cookie updates allow 5 per hour. These counters are held in memory, so they reset when a Free instance restarts.
 
 Keep the access password private and unique. HTTPS is provided by Render for its public domain; the app marks session cookies secure when it detects HTTPS. Do not expose a local server directly to the public internet. Phone access is intended for a trusted local Wi-Fi network and retains its separate six-digit PIN.
 
@@ -62,14 +73,14 @@ Open **Bring your video → YouTube cookies**, then choose a Netscape-format `co
 
 ## Render deployment (Free tier)
 
-The included `render.yaml` stays on Render's **Free** web-service plan. It configures the native Python service, FFmpeg, a health check, authentication, an 800 MB managed-data budget, and a 300 MB upload limit. It does not request a paid plan, paid add-on, or persistent disk.
+The included `render.yaml` stays on Render's **Free** web-service plan. It configures the native Python service, FFmpeg, a health check, public access, an 800 MB managed-data budget, and a 300 MB upload limit. It does not request a paid plan, paid add-on, or persistent disk.
 
 **Free-tier storage is temporary.** Render Free web services have an ephemeral filesystem. Files in `NEONCLIPPING_DATA_DIR` can disappear when the service spins down, restarts, or redeploys. That includes uploaded sources, rendered clips, captions, style assets, creator settings, and the local queue database. The 800 MB quota protects the running instance from filling its working space; it does not make files durable. Keep local copies of clips you need. If durable hosted storage is needed later, choose and authorize a storage service separately before changing this configuration.
 
 1. Push this project to a Git repository and create a Render Blueprint from its `render.yaml`.
 2. Keep the service on **Free**; the repository configuration does not enable a paid tier.
-3. Set `NEONCLIPPING_AUTH_PASSWORD` in the Render Dashboard's Environment page to a unique password of at least 16 characters. `sync: false` asks for the secret during initial Blueprint creation; for an existing service, add it manually in the Dashboard.
-4. Deploy from the Render Dashboard. Confirm the service reports healthy at `/healthz`, sign in at the service URL, then test a small upload and export.
+3. Keep `NEONCLIPPING_REQUIRE_AUTH=0` for public access and `NEONCLIPPING_PRIVATE_COOKIE_ADMIN=1` to protect shared YouTube cookies. Set `NEONCLIPPING_AUTH_PASSWORD` in the Render Environment page; it is used only for the owner Admin Panel and private cookie settings, never to open or use the clipping studio.
+4. Deploy from the Render Dashboard. Confirm the service reports healthy at `/healthz`, then test a small upload and export.
 
 Free web services may spin down after inactivity, take time to wake up, and have limited CPU, memory, processing time, and temporary storage. Large FFmpeg renders and transcription can be slow or be interrupted. The app's in-memory live sessions and active job status also do not survive a restart. Render deployment was not initiated as part of this code change.
 
@@ -79,8 +90,10 @@ Free web services may spin down after inactivity, take time to wake up, and have
 | --- | --- | --- |
 | `PORT` | `8770` locally; set by Render | HTTP listen port |
 | `NEONCLIPPING_DATA_DIR` | `./data` | Location for sources, clips, assets, queue database, and app settings; ephemeral on Render Free |
-| `NEONCLIPPING_REQUIRE_AUTH` | unset | Set to `1` to require the sign-in page |
-| `NEONCLIPPING_AUTH_PASSWORD` | unset | Secret password; keep it in the host's secret settings |
+| `NEONCLIPPING_REQUIRE_AUTH` | unset | Set to `1` to require the sign-in page site-wide; Render sets `0` for public access |
+| `NEONCLIPPING_PRIVATE_COOKIE_ADMIN` | unset | Set to `1` to require a password for shared YouTube cookie settings; Render enables it |
+| `NEONCLIPPING_PUBLIC_MODE` | unset | Set to `1` on public deployments to prevent cross-visitor source-cache reuse |
+| `NEONCLIPPING_AUTH_PASSWORD` | unset | Secret used for private YouTube cookie management; never put it in source control |
 | `NEONCLIPPING_LAN` | unset | Set to `1` to enable same-Wi-Fi phone remote on local runs |
 | `NEONCLIPPING_MAX_UPLOAD_MB` | `300` | Main video upload limit, clamped to 10–700 MB |
 | `NEONCLIPPING_STORAGE_BUDGET_MB` | `800` | Managed data-folder budget, clamped to 128–1024 MB |
