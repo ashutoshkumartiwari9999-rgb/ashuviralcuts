@@ -41,7 +41,7 @@ class AppSmokeTests(unittest.TestCase):
                         self.assertIn('>Choose cookies.txt</button>', dashboard.text)
                         self.assertIn('id="youtube-cookie-upload"', dashboard.text)
                         self.assertIn('id="youtube-cookie-filename"', dashboard.text)
-                        self.assertIn('/assets/youtube-cookies.js?v=4" defer', dashboard.text)
+                        self.assertIn('/assets/youtube-cookies.js?v=5" defer', dashboard.text)
                         self.assertIn('/assets/style.css?v=20261122-cookies2"', dashboard.text)
                         self.assertIn('/assets/app.js?v=20261120-vision1" defer',dashboard.text)
 
@@ -93,6 +93,31 @@ class AppSmokeTests(unittest.TestCase):
                         self.assertEqual(bad_upload.status_code, 415)
 
                 asyncio.run(exercise())
+
+    def test_cookie_upload_accepts_windows_filename_variants_but_validates_contents(self):
+        async def exercise():
+            cases = (
+                ("cookies (1).txt", COOKIE_SAMPLE),
+                ("cookies.txt.txt", COOKIE_SAMPLE),
+                ("YouTube cookies.txt", COOKIE_SAMPLE),
+                ("cookies.txt.txt", b"browser-export-json"),
+            )
+            for index, (name, content) in enumerate(cases, start=20):
+                with self.subTest(filename=name, valid=content == COOKIE_SAMPLE):
+                    transport = httpx.ASGITransport(app=app_module.app, client=(f"192.0.2.{index}", 12345))
+                    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+                        login = await client.post("/auth/login", json={"password": "test-owner-password-for-cookie-tests"})
+                        self.assertEqual(login.status_code, 200, login.text)
+                        response = await client.post("/youtube-cookies", files={"file": (name, content, "text/plain")})
+                        if content == COOKIE_SAMPLE:
+                            self.assertEqual(response.status_code, 200, response.text)
+                            self.assertNotIn("private-cookie-value", response.text)
+                            self.assertEqual((await client.delete("/youtube-cookies")).status_code, 200)
+                        else:
+                            self.assertEqual(response.status_code, 400)
+                            self.assertIn("Netscape", response.text)
+
+        asyncio.run(exercise())
 
     def test_render_blueprint_uses_free_tier_without_disk(self):
         import yaml

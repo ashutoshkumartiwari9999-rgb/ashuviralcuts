@@ -58,20 +58,14 @@
     upload.hidden = false;
     upload.disabled = false;
     note.textContent = chosen.size > 1024 * 1024
-      ? 'The cookies.txt file must be 1 MB or smaller.'
-      : chosen.name.toLowerCase() !== 'cookies.txt'
-        ? 'Choose a file named cookies.txt.'
-        : 'Selected file is ready. Press “Upload cookies” to save it privately.';
+      ? 'The cookies file must be 1 MB or smaller.'
+      : 'Selected file is ready. The server will check that it is a valid Netscape YouTube cookies file.';
   });
 
   upload.addEventListener('click', async () => {
     const chosen = file.files && file.files[0];
     if (!chosen) {
       note.textContent = 'Choose cookies.txt before uploading.';
-      return;
-    }
-    if (chosen.name.toLowerCase() !== 'cookies.txt') {
-      note.textContent = 'Please choose a file named cookies.txt.';
       return;
     }
     if (chosen.size > 1024 * 1024) {
@@ -85,7 +79,9 @@
     clear.disabled = true;
     try {
       const body = new FormData();
-      body.append('file', chosen, 'cookies.txt');
+      // Windows may hide extensions or append a duplicate .txt. The filename is
+      // only display metadata; the server validates size and Netscape contents.
+      body.append('file', chosen);
       const response = await fetch('/youtube-cookies', { method: 'POST', body, credentials: 'same-origin' });
       const data = await response.json();
       if (response.status === 401) throw new Error('Owner sign-in expired. Sign in again before uploading cookies.');

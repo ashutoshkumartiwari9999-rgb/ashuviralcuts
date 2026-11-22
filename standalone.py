@@ -92,9 +92,7 @@ def attach(app,DATA,state,probe):
 
     @app.post('/youtube-cookies')
     async def upload_youtube_cookies(file:UploadFile=File(...)):
-        name=Path(file.filename or '').name.lower()
         try:
-            if name!='cookies.txt':raise HTTPException(400,'Rename the Netscape cookie export to cookies.txt before uploading.')
             raw=await file.read(youtube_cookies.MAX_COOKIE_BYTES+1)
             try:youtube_cookies.save_cookies(DATA,raw)
             except ValueError as error:raise HTTPException(400,str(error)) from error
