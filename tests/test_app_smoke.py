@@ -13,8 +13,7 @@ COOKIE_SAMPLE = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147
 
 
 _TEST_DATA = tempfile.TemporaryDirectory(prefix="ashuviralcuts-test-")
-with patch.dict(os.environ, {"NEONCLIPPING_DATA_DIR": _TEST_DATA.name}, clear=False):
-    os.environ.pop("NEONCLIPPING_REQUIRE_AUTH", None)
+with patch.dict(os.environ, {"NEONCLIPPING_DATA_DIR": _TEST_DATA.name, "NEONCLIPPING_REQUIRE_AUTH": "0", "NEONCLIPPING_PRIVATE_COOKIE_ADMIN": "1", "NEONCLIPPING_AUTH_PASSWORD": "test-owner-password-for-cookie-tests"}, clear=False):
     import app as app_module
 
 
@@ -35,7 +34,11 @@ class AppSmokeTests(unittest.TestCase):
                         self.assertIn("ASHUVIRALCUTS", dashboard.text)
                         self.assertIn("ashutoshkumartiwari9999-rgb", dashboard.text)
                         self.assertIn("ashutosh_official9", dashboard.text)
-                        self.assertIn("YouTube cookies", dashboard.text)
+                        self.assertIn("Upload YouTube cookies.txt", dashboard.text)
+                        self.assertIn("Owner only · private", dashboard.text)
+                        self.assertIn('href="/login?next=/"', dashboard.text)
+                        self.assertIn('/assets/youtube-cookies.js?v=3" defer', dashboard.text)
+                        self.assertIn('/assets/style.css?v=20261122-cookies1"', dashboard.text)
                         self.assertIn('/assets/app.js?v=20261120-vision1" defer',dashboard.text)
 
                         phone = await client.get("/m")
@@ -55,13 +58,25 @@ class AppSmokeTests(unittest.TestCase):
                         self.assertEqual(auth_state.status_code,200)
                         self.assertFalse(auth_state.json()["required"])
                         self.assertEqual((await client.get("/public-settings")).status_code,200)
+                        unauthenticated_cookie_upload = await client.post("/youtube-cookies",files={"file":("cookies.txt",COOKIE_SAMPLE,"text/plain")})
+                        self.assertEqual(unauthenticated_cookie_upload.status_code,401)
+                        self.assertEqual((await client.post("/upload", files={"file":("not-a-video.txt",b"no","text/plain")})).status_code,415)
+                        login = await client.post("/auth/login", json={"password":"test-owner-password-for-cookie-tests"})
+                        self.assertEqual(login.status_code,200,login.text)
+                        invalid_cookies = await client.post("/youtube-cookies",files={"file":("cookies.txt",b"browser-export-json","text/plain")})
+                        self.assertEqual(invalid_cookies.status_code,400)
+                        self.assertIn("Netscape",invalid_cookies.text)
                         cookies = await client.post("/youtube-cookies",files={"file":("cookies.txt",COOKIE_SAMPLE,"text/plain")})
                         self.assertEqual(cookies.status_code,200,cookies.text)
                         self.assertNotIn("private-cookie-value",cookies.text)
+                        self.assertFalse(list(app_module.DATA.glob(".youtube-cookies-*.upload")))
                         self.assertEqual((await client.get("/youtube-cookies/status")).json(),{"configured":True})
                         self.assertEqual((await client.get("/media/.youtube-cookies")).status_code,404)
                         self.assertEqual((await client.delete("/youtube-cookies")).status_code,200)
                         self.assertFalse(app_module.DATA.joinpath(".youtube-cookies.txt").exists())
+                        oversized_cookies = await client.post("/youtube-cookies",files={"file":("cookies.txt",b"x"*(1024*1024+1),"text/plain")})
+                        self.assertIn(oversized_cookies.status_code,(400,413))
+                        self.assertIn("1 MB",oversized_cookies.text)
 
                         storage_report = await client.get("/storage")
                         self.assertEqual(storage_report.status_code, 200)

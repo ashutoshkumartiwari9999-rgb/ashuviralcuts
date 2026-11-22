@@ -99,6 +99,10 @@ class OwnerAdminTests(unittest.TestCase):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="https://testserver") as client:
                 response = await client.get("/youtube-cookies/status")
                 self.assertEqual(response.status_code, 401)
+                response = await client.post("/youtube-cookies", files={"file": ("cookies.txt", b"private", "text/plain")})
+                self.assertEqual(response.status_code, 401)
+                response = await client.delete("/youtube-cookies")
+                self.assertEqual(response.status_code, 401)
 
         asyncio.run(exercise())
 
