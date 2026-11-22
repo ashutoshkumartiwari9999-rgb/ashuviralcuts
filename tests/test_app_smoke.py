@@ -127,6 +127,7 @@ class AppSmokeTests(unittest.TestCase):
         self.assertEqual(service["plan"], "free")
         self.assertNotIn("disk", service)
         self.assertIn("DENO_INSTALL=/opt/render/project/src/.deno", service["buildCommand"])
+        self.assertNotIn("apt-get", service["buildCommand"])
         self.assertIn("https://deno.land/install.sh", service["buildCommand"])
         self.assertIn('NEONCLIPPING_DENO_PATH="$DENO_INSTALL/bin/deno"', service["startCommand"])
         self.assertIn('test -x "$NEONCLIPPING_DENO_PATH"', service["startCommand"])
