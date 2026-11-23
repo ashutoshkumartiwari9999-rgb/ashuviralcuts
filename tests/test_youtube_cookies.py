@@ -83,19 +83,15 @@ class YoutubeCookieTests(unittest.TestCase):
             self.assertIn("rejected", rejected)
             self.assertNotIn("private-cookie-value", rejected)
 
-    def test_cookie_copy_is_private_and_removed_after_ytdlp_job(self):
+    def test_public_youtube_request_does_not_send_configured_cookies(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             youtube_cookies.save_cookies(root, SAMPLE)
-            self.assertTrue(youtube_cookies.has_cookies(root))
-            observed = {}
             seen_options = []
 
             class FakeDownloader:
                 def __init__(self, options):
                     seen_options.append(dict(options))
-                    observed.update(options)
-                    observed["temp_exists_during_job"] = Path(options["cookiefile"]).exists() if "cookiefile" in options else False
 
                 def __enter__(self):
                     return self
@@ -103,20 +99,78 @@ class YoutubeCookieTests(unittest.TestCase):
                 def __exit__(self, *_):
                     return False
 
-            with patch("yt_dlp.YoutubeDL", FakeDownloader):
-                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {"quiet": True}):
-                    temporary = Path(observed["cookiefile"])
-                    self.assertTrue(temporary.exists())
-                    self.assertFalse(observed["no_warnings"])
-                    self.assertTrue(callable(observed["logger"].warning))
-                    self.assertEqual(temporary.read_bytes(), SAMPLE)
-                    self.assertTrue(observed["temp_exists_during_job"])
-                self.assertFalse(temporary.exists())
+                def extract_info(self, *_args, **_kwargs):
+                    return {"id": "public-video"}
 
-                for url in ("https://twitch.tv/channel", "https://kick.com/channel"):
-                    with youtube_cookies.youtube_dl(url, root, {"quiet": True}):
-                        pass
-                    self.assertNotIn("cookiefile", seen_options[-1])
+            with patch("yt_dlp.YoutubeDL", FakeDownloader):
+                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {"quiet": True}) as request:
+                    self.assertEqual(request.extract_info("https://youtube.com/watch?v=abc", download=False)["id"], "public-video")
+                self.assertEqual(len(seen_options), 1)
+                self.assertNotIn("cookiefile", seen_options[0])
+                self.assertFalse(list(root.glob(".yt-cookie-*.txt")))
+
+    def test_authentication_failure_retries_with_private_cookie_copy_and_cleans_it(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            youtube_cookies.save_cookies(root, SAMPLE)
+            seen = []
+            temporary_files = []
+
+            class FakeDownloader:
+                def __init__(self, options):
+                    cookie_file = options.get("cookiefile")
+                    seen.append(bool(cookie_file))
+                    if cookie_file:
+                        cookie_path = Path(cookie_file)
+                        temporary_files.append(cookie_path)
+                        self.private_copy_exists = cookie_path.is_file()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def extract_info(self, *_args, **_kwargs):
+                    if not seen[-1]:
+                        raise RuntimeError("Sign in to confirm you're not a bot")
+                    return {"id": "authenticated-fallback"}
+
+            with patch("yt_dlp.YoutubeDL", FakeDownloader):
+                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {"quiet": True}) as request:
+                    result = request.extract_info("https://youtube.com/watch?v=abc", download=False)
+                self.assertEqual(result["id"], "authenticated-fallback")
+            self.assertEqual(seen, [False, True])
+            self.assertEqual(len(temporary_files), 1)
+            self.assertFalse(temporary_files[0].exists())
+            self.assertFalse(list(root.glob(".yt-cookie-*.txt")))
+
+    def test_cookie_fallback_is_not_used_for_po_token_or_network_failures(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            youtube_cookies.save_cookies(root, SAMPLE)
+            seen = []
+
+            class FakeDownloader:
+                def __init__(self, options):
+                    seen.append("cookiefile" in options)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def extract_info(self, *_args, **_kwargs):
+                    raise RuntimeError("PO Token required; private-token=do-not-show")
+
+            with patch("yt_dlp.YoutubeDL", FakeDownloader):
+                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {"quiet": True}) as request:
+                    with self.assertRaises(youtube_cookies.YoutubeDownloadFailure) as caught:
+                        request.extract_info("https://youtube.com/watch?v=abc", download=False)
+            self.assertEqual(seen, [False])
+            self.assertEqual(caught.exception.youtube_category, "po_token")
+            self.assertNotIn("do-not-show", str(caught.exception))
 
     def test_actionable_youtube_error_does_not_echo_extractor_details(self):
         message = youtube_cookies.user_error(
@@ -157,10 +211,11 @@ class YoutubeCookieTests(unittest.TestCase):
             def __init__(self, options): observed.append(options)
             def __enter__(self): return self
             def __exit__(self, *_): return False
+            def extract_info(self, *_args, **_kwargs): return {"id": "ok"}
         with patch.dict("os.environ", {"NEONCLIPPING_DENO_PATH": "/render/.deno/bin/deno"}):
             with patch("yt_dlp.YoutubeDL", FakeDownloader):
-                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", Path("."), {}):
-                    pass
+                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", Path("."), {}) as request:
+                    request.extract_info("https://youtube.com/watch?v=abc", download=False)
                 with youtube_cookies.youtube_dl("https://twitch.tv/channel", Path("."), {}):
                     pass
         self.assertEqual(observed[0]["js_runtimes"], {"deno": {"path": "/render/.deno/bin/deno"}})

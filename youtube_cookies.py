@@ -241,47 +241,85 @@ def remove_cookies(data_dir: Path) -> None:
 
 @contextmanager
 def youtube_dl(url: str, data_dir: Path, options: dict):
-    """Create a private per-job cookie copy and always remove it after yt-dlp exits."""
-    temp_cookie = None
-    configured = dict(options)
-    diagnostics = None
+    """Try public YouTube access first; use a private cookie copy only on auth failure."""
+    if is_youtube_url(url):
+        yield _YoutubeRequest(url, Path(data_dir), dict(options))
+        return
     try:
-        if is_youtube_url(url):
-            diagnostics = _SafeYtDlpLogger()
-            configured["logger"] = diagnostics
-            # Keep warnings inside the in-memory classifier; quiet mode and the
-            # custom logger prevent raw yt-dlp text from reaching stdout/stderr.
-            configured["no_warnings"] = False
-            # Render installs Deno in a project-local directory, so tell
-            # yt-dlp its exact path instead of relying on process PATH lookup.
-            deno_path = os.environ.get("NEONCLIPPING_DENO_PATH")
-            if deno_path:
-                configured.setdefault("js_runtimes", {"deno": {"path": deno_path}})
-            source = cookie_path(data_dir)
-            with _LOCK:
-                if source.is_file():
-                    fd, name = tempfile.mkstemp(prefix=".yt-cookie-", suffix=".txt", dir=data_dir)
-                    temp_cookie = Path(name)
-                    try:
-                        os.chmod(temp_cookie, 0o600)
-                    except OSError:
-                        pass
-                    with os.fdopen(fd, "wb") as output:
-                        output.write(source.read_bytes())
-            if temp_cookie:
-                configured["cookiefile"] = str(temp_cookie)
+        import yt_dlp
+        with yt_dlp.YoutubeDL(dict(options)) as downloader:
+            yield downloader
+    except Exception as error:
+        raise RuntimeError(user_error(error, url, data_dir)) from None
+
+
+class _YoutubeRequest:
+    """Retry one yt-dlp operation with saved cookies only after sign-in is required."""
+    def __init__(self, url: str, data_dir: Path, options: dict):
+        self.url = url
+        self.data_dir = data_dir
+        self.options = options
+
+    def _configured(self, diagnostics: _SafeYtDlpLogger, cookie_file: Path | None = None) -> dict:
+        configured = dict(self.options)
+        configured["logger"] = diagnostics
+        configured["no_warnings"] = False
+        deno_path = os.environ.get("NEONCLIPPING_DENO_PATH")
+        if deno_path:
+            configured.setdefault("js_runtimes", {"deno": {"path": deno_path}})
+        if cookie_file is not None:
+            configured["cookiefile"] = str(cookie_file)
+        else:
+            configured.pop("cookiefile", None)
+        return configured
+
+    def _invoke(self, method: str, args: tuple, kwargs: dict, cookie_file: Path | None = None):
+        import yt_dlp
+        diagnostics = _SafeYtDlpLogger()
         try:
-            import yt_dlp
-            with yt_dlp.YoutubeDL(configured) as downloader:
-                yield downloader
+            with yt_dlp.YoutubeDL(self._configured(diagnostics, cookie_file)) as downloader:
+                return getattr(downloader, method)(*args, **kwargs)
         except Exception as error:
-            if is_youtube_url(url):
-                category = _classify_youtube_failure(str(error), diagnostics.categories if diagnostics else ())
-                raise YoutubeDownloadFailure(category) from None
-            raise RuntimeError(user_error(error, url, data_dir)) from None
-    finally:
-        if temp_cookie:
-            temp_cookie.unlink(missing_ok=True)
+            category = _classify_youtube_failure(str(error), diagnostics.categories)
+            raise YoutubeDownloadFailure(category) from None
+
+    @contextmanager
+    def _private_cookie_copy(self):
+        source = cookie_path(self.data_dir)
+        temp_cookie = None
+        try:
+            if cookie_state(self.data_dir) == "available":
+                with _LOCK:
+                    if source.is_file():
+                        fd, name = tempfile.mkstemp(prefix=".yt-cookie-", suffix=".txt", dir=self.data_dir)
+                        temp_cookie = Path(name)
+                        try:
+                            os.chmod(temp_cookie, 0o600)
+                        except OSError:
+                            pass
+                        with os.fdopen(fd, "wb") as output:
+                            output.write(source.read_bytes())
+            yield temp_cookie
+        finally:
+            if temp_cookie:
+                temp_cookie.unlink(missing_ok=True)
+
+    def _run(self, method: str, *args, **kwargs):
+        try:
+            return self._invoke(method, args, kwargs)
+        except YoutubeDownloadFailure as first_error:
+            if first_error.youtube_category != "authentication":
+                raise
+            with self._private_cookie_copy() as cookie_file:
+                if cookie_file is None:
+                    raise
+                return self._invoke(method, args, kwargs, cookie_file)
+
+    def extract_info(self, *args, **kwargs):
+        return self._run("extract_info", *args, **kwargs)
+
+    def download(self, *args, **kwargs):
+        return self._run("download", *args, **kwargs)
 
 
 def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> str:
