@@ -18,6 +18,7 @@ import curation
 import facecam_detect
 import storage
 import youtube_cookies
+import processing
 ROOT=Path(__file__).resolve().parent
 DATA=Path(os.environ.get('NEONCLIPPING_DATA_DIR',str(ROOT/'data'))).resolve();DATA.mkdir(parents=True,exist_ok=True)
 @asynccontextmanager
@@ -142,7 +143,7 @@ def caption_job(b:dict):
    result=transcribe(src,start,end,DATA,lambda msg:state[job].update(message=msg),language)
    state[job]={'status':'done',**result,'source_id':id,'start':start,'end':end}
   except Exception as e:state[job]={'status':'error','error':'Caption generation failed: '+str(e)[-500:]}
- threading.Thread(target=work,daemon=True).start();return {'job':job}
+ processing.start(job,work,state,on_busy=lambda:DATA.joinpath(job+'.state.json').unlink(missing_ok=True));return {'job':job}
 
 @app.post('/export')
 def export(b:dict):
@@ -200,21 +201,26 @@ def export(b:dict):
    af,amap=plan.audio(dur) if plan else (None,None)
    if af:fc+=';'+af
    state[job].update(message='Rendering vertical clip with '+style+' captions' if words else 'Rendering vertical clip')
-   base=['ffmpeg','-y','-v','error','-ss',str(start),'-t',str(end-start),'-i',str(src),*(plan.inputs if plan else []),'-filter_complex',fc,'-map','[v]','-map',amap or '0:a?','-t',str(dur),'-c:a','aac','-b:a','160k','-movflags','+faststart']
+   base=['ffmpeg','-y','-v','error','-filter_complex_threads','1','-ss',str(start),'-t',str(end-start),'-i',str(src),*(plan.inputs if plan else []),'-filter_complex',fc,'-map','[v]','-map',amap or '0:a?','-t',str(dur),'-c:a','aac','-b:a','160k','-movflags','+faststart']
    if fps:base+=['-r',str(fps),'-fps_mode','cfr']
    for encoder in [['-c:v','h264_nvenc','-preset','p5','-cq','20'],['-c:v','h264_qsv','-global_quality','23','-preset','veryfast'],['-c:v','libx264','-crf','21','-preset','veryfast']]:
-    r=subprocess.run(base+encoder+['-pix_fmt','yuv420p',str(out)],capture_output=True,text=True,cwd=str(DATA))
+    r=subprocess.run(base+encoder+['-pix_fmt','yuv420p','-threads','1',str(out)],capture_output=True,text=True,cwd=str(DATA),timeout=900)
     if r.returncode==0:break
    if r.returncode:raise RuntimeError(r.stderr[-900:])
    finished={'status':'done','file':job,'meta':probe(out),'encoder':encoder[1],'caption_words':len(words),'srt':f'/text/{job}/srt' if words else None}
    (DATA/(job+'.json')).write_text(json.dumps({'source':id,'settings':{**b,'words':words},'result':finished},indent=2),encoding='utf-8')
    state[job]=finished
   except Exception as e:state[job]={'status':'error','error':str(e)}
- threading.Thread(target=work,daemon=True).start();return {'job':job}
+ processing.start(job,work,state);return {'job':job}
 PAD=4.0         # seconds fetched before a section: yt-dlp cuts on a keyframe, export trims exactly
 FAST_OVER=600   # seconds: longer videos go audio-first, short ones are downloaded whole
 def _yt(opts,url):
- return youtube_cookies.youtube_dl(url,DATA,{'noplaylist':True,'quiet':True,'no_warnings':True,'socket_timeout':20,'retries':3,'fragment_retries':3,'concurrent_fragment_downloads':6,**opts})
+ options={'noplaylist':True,'quiet':True,'no_warnings':True,'socket_timeout':20,'retries':3,'fragment_retries':3,'concurrent_fragment_downloads':1,**opts}
+ hooks=list(options.get('progress_hooks') or []);deadline=time.monotonic()+30*60
+ def enforce_timeout(_event):
+  if time.monotonic()>deadline:raise TimeoutError('YouTube download exceeded the 30-minute processing limit.')
+ options['progress_hooks']=[enforce_timeout,*hooks]
+ return youtube_cookies.youtube_dl(url,DATA,options)
 def _dur(p):
  r=subprocess.run(['ffprobe','-v','error','-show_entries','format=duration','-of','csv=p=0',str(p)],capture_output=True,text=True,check=True);return float(r.stdout.strip())
 
@@ -253,6 +259,26 @@ def ai_found(moments,yt_words,duration):
  if not out:raise RuntimeError('None of the pasted moments fit inside this video.')
  return out,'AI answer'
 
+def constrain_clips(found,duration,min_len=20,max_len=25):
+ """Keep automatic and supplied candidates inside the requested short-clip window."""
+ clips=[]
+ for candidate in found:
+  try:original_start=float(candidate.get('start'))
+  except (TypeError,ValueError,OverflowError):continue
+  bounds=processing.fit_clip_range(original_start,candidate.get('end'),duration,min_len,max_len)
+  if bounds is None:continue
+  adjusted={**candidate,'start':bounds[0],'end':bounds[1]}
+  if isinstance(candidate.get('words'),list):
+   delta=original_start-bounds[0];words=[]
+   for word in candidate['words']:
+    try:a=float(word['start'])+delta;z=float(word['end'])+delta
+    except (KeyError,TypeError,ValueError,OverflowError):continue
+    a=max(0,round(a,3));z=min(bounds[1]-bounds[0],round(z,3))
+    if a<z:words.append({**word,'start':a,'end':z})
+   adjusted['words']=words
+  clips.append(adjusted)
+ return clips
+
 @app.post('/make')
 def make(b:dict):
  """One click. Short video: download, smart highlights, export. Long video (PeakCut-style): download AUDIO only, pick moments from
@@ -262,11 +288,9 @@ def make(b:dict):
   try:storage.ensure_capacity(DATA,64*storage.MIB)
   except storage.StorageLimitError as e:raise HTTPException(507,str(e)) from e
  try:
-  count=max(1,min(12,int(b.get('count',4))));raw_max=float(b.get('max_len',b.get('length',60)));raw_min=float(b.get('min_len',30))
-  if not (math.isfinite(raw_max) and math.isfinite(raw_min)):raise ValueError()
-  max_len=max(10,min(180,raw_max));min_len=max(5,min(max_len,raw_min))
- except (TypeError,ValueError,OverflowError):raise HTTPException(400,'Choose a valid clip count and length range.')
- if raw_min>raw_max:raise HTTPException(400,'Minimum clip length is longer than the maximum. Make the minimum smaller or the maximum bigger.')
+  count=max(1,min(12,int(b.get('count',4))))
+  min_len,max_len=processing.clip_length_bounds(b.get('min_len',20),b.get('max_len',25))
+ except (TypeError,ValueError,OverflowError):raise HTTPException(400,'Choose a valid clip count and a 20–25 second length range.')
  moments=b.get('moments')
  if moments is not None:
   if not isinstance(moments,list) or not 1<=len(moments)<=40 or not all(isinstance(m,dict) for m in moments):raise HTTPException(400,'Moments must be a list of 1 to 40 items with start and end.')
@@ -366,7 +390,7 @@ def make(b:dict):
     p=next(f for f in DATA.glob(job+'.audio.*') if f.suffix not in ('.part','.ytdl'));duration=_dur(p);sid=job
     save(job,{'meta':{'duration':duration},'stage':'Finding moments in audio','progress':.12})
     found,engine=ai_found(moments,yt_words,duration) if moments else find(p,duration,count,max_len,lambda f,m:save(job,{'stage':m,'progress':.12+.4*f}),language,DATA,min_len,False,yt_words,False,W,False,profile,focus_brief,include_phrases,exclude_phrases)
-    found=choose(found,lambda c:lowres_section(url,c))
+    found=constrain_clips(choose(found,lambda c:lowres_section(url,c)),duration,min_len,max_len)
     if not found:
      save(job,{'status':'done','stage':'No moments matched the transcript filters. Broaden the focus or required phrases.','progress':1,'clips':[],'elapsed_seconds':round(time.monotonic()-began,2)});return
     save(job,{'engine':engine+' (audio-first)','stage':'Fetching only the chosen sections','progress':.58,'candidates':len(found)})
@@ -384,7 +408,7 @@ def make(b:dict):
     else:sid,p=src0.stem,src0
     meta=probe(p);duration=meta['duration'];save(job,{'source_id':sid,'meta':meta,'stage':'Finding moments','progress':.1})
     found,engine=ai_found(moments,yt_words,duration) if moments else find(p,duration,count,max_len,lambda f,m:save(job,{'stage':m,'progress':.1+.5*f}),language,DATA,min_len,True,yt_words,mode=='deep',W,False,profile,focus_brief,include_phrases,exclude_phrases)
-    found=choose(found,lambda c:(p,c['start']))
+    found=constrain_clips(choose(found,lambda c:(p,c['start'])),duration,min_len,max_len)
     if not found:
      save(job,{'status':'done','stage':'No moments matched the transcript filters. Broaden the focus or required phrases.','progress':1,'clips':[],'elapsed_seconds':round(time.monotonic()-began,2)});return
     save(job,{'engine':engine,'stage':'Rendering clips','progress':.6,'candidates':len(found)})
@@ -437,10 +461,13 @@ def make(b:dict):
     save(job,{'clips':list(done),'stage':f'Rendered {i+1}/{len(found)}','progress':.6+.4*(i+1)/len(found)})
    save(job,{'status':'done','stage':'Clips ready','progress':1,'elapsed_seconds':round(time.monotonic()-began,1)})
   except Exception as e:save(job,{'status':'error','error':_make_failure_message(e,url)})
- threading.Thread(target=work,daemon=True).start();return {'job':job}
+ processing.start(job,work,state,on_busy=lambda:DATA.joinpath(job+'.state.json').unlink(missing_ok=True));return {'job':job}
 LIVE={}
 
 def live_render(sess,start,dur,why,chat_feature):
+ return processing.run_sync(uuid.uuid4().hex,_live_render_work,sess,start,dur,why,chat_feature)
+
+def _live_render_work(sess,start,dur,why,chat_feature):
  """Cut the backdated window out of the growing recording, caption it, write a hook, export with the user's layout."""
  import learn,excite
  from translit import to_hinglish

@@ -6,6 +6,7 @@ No model weights are downloaded or images sent to a hosted provider.
 import base64
 import hashlib
 import json
+import processing
 import subprocess
 import threading
 import time
@@ -96,4 +97,4 @@ def attach(app,data,state,probe):
         def work():
             try:state[job]={'status':'done','review':review(data/(name+'.mp4'),start,end-start,data,lambda text:state[job].update(message=text))}
             except Exception as error:state[job]={'status':'error','error':str(error)[-500:]}
-        threading.Thread(target=work,daemon=True).start();return {'job':job}
+        processing.start(job,work,state);return {'job':job}

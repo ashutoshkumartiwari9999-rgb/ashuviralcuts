@@ -180,7 +180,7 @@ class AppSmokeTests(unittest.TestCase):
             app_module.state[clip_id] = {"status": "done", "meta": {"duration": 7.0}}
             return {"job": clip_id}
 
-        with patch.object(app_module, "probe", return_value={"w": 320, "h": 240, "duration": 12.0}), \
+        with patch.object(app_module, "probe", return_value={"w": 320, "h": 240, "duration": 30.0}), \
              patch("transcripts.cached_source", return_value=None), \
              patch("learn.load_weights", return_value={}), \
              patch("action.analyze", return_value={"motion": 0.5, "flash": 0, "strobe": 0, "cuts": 0}), \
@@ -191,7 +191,7 @@ class AppSmokeTests(unittest.TestCase):
             async def exercise():
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_module.app), base_url="http://testserver") as client:
                     response = await client.post("/make", json={
-                        "id": source_id, "count": 1, "min_len": 5, "max_len": 10,
+                        "id": source_id, "count": 1, "min_len": 20, "max_len": 25,
                         "moments": [{"start": 1, "end": 8, "title": "Regression clip", "hook": "Test hook"}],
                     })
                     self.assertEqual(response.status_code, 200, response.text)
@@ -225,7 +225,7 @@ class AppSmokeTests(unittest.TestCase):
         import smart  # Ensure module initialization happens before substituting the worker thread.
 
         class InlineThread:
-            def __init__(self, target, daemon=False):
+            def __init__(self, target, daemon=False, name=None):
                 self.target = target
 
             def start(self):
@@ -256,6 +256,19 @@ class AppSmokeTests(unittest.TestCase):
                     (app_module.DATA / f"{job}.state.json").unlink(missing_ok=True)
         finally:
             youtube_cookies.remove_cookies(app_module.DATA)
+
+    def test_automatic_candidates_are_constrained_to_20_to_25_seconds(self):
+        candidates = [
+            {"start": 10, "end": 60, "title": "Long moment"},
+            {"start": 95, "end": 100, "title": "Near end"},
+            {"start": 0, "end": 10, "title": "Too short source"},
+        ]
+        fitted = app_module.constrain_clips(candidates, 100, 20, 25)
+        self.assertEqual(len(fitted), 3)
+        for clip in fitted:
+            self.assertGreaterEqual(clip["end"] - clip["start"], 20)
+            self.assertLessEqual(clip["end"] - clip["start"], 25)
+            self.assertLessEqual(clip["end"], 100)
 
 
 if __name__ == "__main__":

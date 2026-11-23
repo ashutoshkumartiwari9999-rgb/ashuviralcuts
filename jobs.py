@@ -6,6 +6,7 @@ import time
 import uuid
 from pathlib import Path
 from fastapi import HTTPException
+import processing
 
 class _ClosingConnection(sqlite3.Connection):
     """Make `with connect()` release the SQLite file handle as well as commit."""
@@ -81,23 +82,37 @@ class JobQueue:
         return self.get(row['id'])
 
     def run_once(self):
-        job=self.claim()
-        if job is None:return False
-        try:
-            started=self.handlers[job['kind']](job['payload']);child=started['job']
-            with self.connect() as db:db.execute('UPDATE jobs SET child=? WHERE id=?',(child,job['id']))
-            while not self.stopped.is_set():
-                result=dict(self.state.get(child,{}))
-                if result.get('status') not in ('running','queued',None):break
-                with self.connect() as db:db.execute('UPDATE jobs SET result=?,updated=? WHERE id=?',(json.dumps(result),time.time(),job['id']))
-                self.stopped.wait(.4)
-            if self.stopped.is_set():return True
-            status='done' if result.get('status')=='done' else 'error'
-        except Exception as error:
-            status='error';result={'status':'error','error':str(getattr(error,'detail',error))[-1000:]}
+        # Reserve before claiming a queued record so direct /make, /export,
+        # imports, and queued work all share the same process-wide slot.
+        if self.paused():return False
         with self.connect() as db:
-            db.execute('UPDATE jobs SET status=?,result=?,updated=? WHERE id=?',(status,json.dumps(result),time.time(),job['id']))
-        return True
+            ready=db.execute("SELECT 1 FROM jobs WHERE status='queued' AND not_before<=? LIMIT 1",(time.time(),)).fetchone()
+        if ready is None:return False
+        owner=processing.reserve('queue-'+uuid.uuid4().hex)
+        if owner is None:return False
+        owner_token=processing.bind(owner)
+        job=None
+        try:
+            job=self.claim()
+            if job is None:return False
+            try:
+                started=self.handlers[job['kind']](job['payload']);child=started['job']
+                with self.connect() as db:db.execute('UPDATE jobs SET child=? WHERE id=?',(child,job['id']))
+                while True:
+                    result=dict(self.state.get(child,{}))
+                    if result.get('status') not in ('running','queued',None):break
+                    with self.connect() as db:db.execute('UPDATE jobs SET result=?,updated=? WHERE id=?',(json.dumps(result),time.time(),job['id']))
+                    if self.stopped.is_set():time.sleep(.4)
+                    else:self.stopped.wait(.4)
+                status='done' if result.get('status')=='done' else 'error'
+            except Exception as error:
+                status='error';result={'status':'error','error':str(getattr(error,'detail',error))[-1000:]}
+            with self.connect() as db:
+                db.execute('UPDATE jobs SET status=?,result=?,updated=? WHERE id=?',(status,json.dumps(result),time.time(),job['id']))
+            return True
+        finally:
+            processing.unbind(owner_token)
+            processing.release(owner)
 
     def run(self):
         while not self.stopped.is_set():

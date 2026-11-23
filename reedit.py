@@ -1,5 +1,6 @@
 """Native saved-clip editing. Never download, discover moments or invoke ASR here."""
 import json
+import processing
 import math
 import threading
 import time
@@ -185,5 +186,5 @@ def attach(app,data,state,probe,export,save):
                     save(job,{'clips':clips,'progress':(i+1)/len(prepared),'stage':f'Updated {i+1}/{len(prepared)}'})
                 save(job,{'status':'done','stage':'Edits applied','elapsed_seconds':round(time.monotonic()-began,2)})
             except Exception as error:save(job,{'status':'error','error':str(error)[-600:]})
-        threading.Thread(target=work,daemon=True).start()
+        processing.start(job,work,state,on_busy=lambda:data.joinpath(job+'.state.json').unlink(missing_ok=True))
         return {'job':job,'clips':len(prepared)}

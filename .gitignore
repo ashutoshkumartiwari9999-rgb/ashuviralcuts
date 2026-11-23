@@ -10,6 +10,7 @@ data/
 models/
 live/
 *.log
+ashuviralcuts-before-*.zip
 cookies.txt
 *youtube*cookies*.txt
 .youtube-cookies*

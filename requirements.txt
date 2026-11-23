@@ -5,6 +5,8 @@ yt-dlp[default]==2026.10.26
 numpy==2.4.5
 Pillow==13.0.0
 faster-whisper==1.2.1
+# faster-whisper 1.2.1 passes metadata_errors to av.open(); PyAV 19 removed it.
+av==18.1.0
 opencv-python-headless==4.14.0.94
 streamlink==8.6.3
 pytchat==0.5.5

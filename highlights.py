@@ -1,4 +1,4 @@
-"""Independent highlight ranking v2: optical-flow motion + audio spikes, in parallel.
+"""Independent highlight ranking v2: optical-flow motion + audio spikes.
 
 Signals (all local, no model download):
   motion  - OpenCV Farneback optical flow at 160x90, 90th-percentile magnitude per second (fast objects,
@@ -6,7 +6,7 @@ Signals (all local, no model download):
   audio   - loudness JUMP vs the local 2-minute baseline (sudden boom/shout beats constantly loud music).
   shout   - share of 2-4 kHz energy (voices raised, screams, impacts) weighted by loudness jump.
   cuts    - editing/camera-cut density.
-The source is split into time chunks decoded by parallel FFmpeg processes (decode is the bottleneck).
+Analysis is deliberately serialized and audio is processed in bounded chunks to fit small instances.
 Candidates only; semantic re-ranking happens in smart.py.
 """
 import os, subprocess
@@ -47,7 +47,7 @@ def _chunk(source, start, length, report):
     return f, c
 
 def _motion(source, duration, report):
-    workers = max(2, min(12, (os.cpu_count() or 4) - 2))
+    workers = 1
     size = max(60, int(np.ceil(duration / workers / 60) * 60))          # whole-minute chunks
     starts = list(range(0, int(np.ceil(duration)), size))
     done = [0.]
@@ -61,15 +61,39 @@ def _motion(source, duration, report):
 
 def _audio(source):
     cmd = ['ffmpeg', '-v', 'error', '-i', str(source), '-vn', '-ac', '1', '-ar', '8000', '-f', 's16le', 'pipe:1']
-    raw = subprocess.run(cmd, capture_output=True).stdout
-    x = np.frombuffer(raw[:len(raw) // 2 * 2], np.int16).astype(np.float32) / 32768
-    n = len(x) // 8000
-    if n == 0: return np.zeros(0), np.zeros(0)
-    x = x[:n * 8000].reshape(n, 8000)
-    rms = np.sqrt((x ** 2).mean(1))
-    spec = np.abs(np.fft.rfft(x * np.hanning(8000), axis=1)) ** 2          # 1 Hz bins
-    hf = spec[:, 2000:4000].sum(1) / (spec.sum(1) + 1e-9)
-    return rms, hf
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+    bytes_per_second = 8000 * 2
+    chunk_bytes = 20 * bytes_per_second
+    pending = bytearray()
+    rms_parts, hf_parts = [], []
+    window = np.hanning(8000).astype(np.float32)
+    try:
+        while True:
+            raw = process.stdout.read(chunk_bytes)
+            if not raw:
+                break
+            pending.extend(raw)
+            usable = len(pending) // bytes_per_second * bytes_per_second
+            if not usable:
+                continue
+            samples = np.frombuffer(memoryview(pending)[:usable], np.int16).astype(np.float32) / 32768
+            del pending[:usable]
+            frames = samples.reshape(-1, 8000)
+            rms_parts.append(np.sqrt(np.mean(frames * frames, axis=1)))
+            power = np.abs(np.fft.rfft(frames * window[None, :], axis=1)) ** 2  # 1 Hz bins
+            hf_parts.append(power[:, 2000:4000].sum(1) / (power.sum(1) + 1e-9))
+            del samples, frames, power
+        if process.wait() != 0:
+            raise RuntimeError('Audio analysis failed.')
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        if process.stdout:
+            process.stdout.close()
+    if not rms_parts:
+        return np.zeros(0), np.zeros(0)
+    return np.concatenate(rms_parts), np.concatenate(hf_parts)
 
 def _z(x, n, win=120):
     """Local z-score vs a rolling baseline, clipped to 0..1 (z of 3.5 = 1)."""
@@ -81,9 +105,8 @@ def _z(x, n, win=120):
     return np.clip((y - mu) / sd / 3.5, 0, 1)
 
 def rank(source, duration, count=4, length=30, report=lambda seconds: None, motion_on=True, extra=None):
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        m = pool.submit(_motion, source, duration, report) if motion_on else pool.submit(lambda: (np.zeros(0), np.zeros(0))); a = pool.submit(_audio, source)
-        (flow, cuts), (rms, hf) = m.result(), a.result()
+    (flow, cuts) = _motion(source, duration, report) if motion_on else (np.zeros(0), np.zeros(0))
+    rms, hf = _audio(source)
     n = max(1, int(np.ceil(duration)))
     has_audio = len(rms) > 0
     motion = _z(flow, n); cut = _z(cuts, n)

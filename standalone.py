@@ -14,6 +14,7 @@ from previews import prepare
 from fastapi.responses import FileResponse, JSONResponse
 import storage
 import youtube_cookies
+import processing
 
 def allowed(url):
     parsed=urlparse(url);host=(parsed.hostname or '').lower()
@@ -52,14 +53,16 @@ def attach(app,DATA,state,probe):
         except storage.StorageLimitError as error:raise HTTPException(507,str(error)) from error
         directory=DATA/job;directory.mkdir(exist_ok=True)
         target=DATA/(job+'.mp4')
+        download_deadline=time.monotonic()+30*60
         def progress(event):
+            if time.monotonic()>download_deadline:raise TimeoutError('Video download exceeded the 30-minute processing limit.')
             if event.get('status')=='downloading':
                 got=event.get('downloaded_bytes',0);total=event.get('total_bytes') or event.get('total_bytes_estimate') or 0
                 msg=f'Downloading 720p: {got/1048576:.1f} MB'+(f' / {total/1048576:.1f} MB' if total else '')
                 state[job].update(message=msg,stage=msg,progress=min(.3,got/total*.3) if total else .1)
             elif event.get('status')=='finished':state[job].update(message='Merging source video',stage='Merging source video')
         options={'noplaylist':True,'format':'best[height<=720][ext=mp4]/bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720]',
-                 'outtmpl':str(directory/'source.%(ext)s'),'merge_output_format':'mp4','socket_timeout':15,'retries':2,'fragment_retries':2,
+                 'outtmpl':str(directory/'source.%(ext)s'),'merge_output_format':'mp4','socket_timeout':15,'retries':2,'fragment_retries':2,'concurrent_fragment_downloads':1,
                  'extractor_retries':1,'progress_hooks':[progress],'quiet':True,'no_warnings':True}
         try:
             with youtube_cookies.youtube_dl(url,DATA,options) as downloader:downloader.download([url])
@@ -121,12 +124,14 @@ def attach(app,DATA,state,probe):
         def preview_work():
             try:prepare(url,job,DATA,probe,lambda fields:save(job,fields))
             except Exception as error:save(job,{'preview_status':'unavailable','preview_error':'Early frames unavailable; full download continues. '+youtube_cookies.user_error(error,url,DATA)})
-        threading.Thread(target=preview_work,daemon=True).start()
         def work():
+            preview_thread=processing.spawn_child(preview_work,name=f'video-preview-{job[:8]}')
             try:
                 id,p=download(url,job);save(job,{'status':'done','id':id,**probe(p)})
             except Exception as error:save(job,{'status':'error','error':'Import failed. '+youtube_cookies.user_error(error,url,DATA)})
-        threading.Thread(target=work,daemon=True).start();return {'job':job}
+            finally:
+                preview_thread.join()
+        processing.start(job,work,state,on_busy=lambda:(DATA.joinpath(job+'.state.json').unlink(missing_ok=True),shutil.rmtree(DATA/(job+'-preview'),ignore_errors=True)));return {'job':job}
 
     @app.get('/preview/{job}/{index}')
     def preview_file(job:str,index:int):
@@ -157,7 +162,7 @@ def attach(app,DATA,state,probe):
                           'title':'Imported video' if url else 'Uploaded video','clips':clips,'engine':engine,
                           'elapsed_seconds':round(time.monotonic()-began,2),'meta':meta})
             except Exception as error:save(job,{'id':job,'status':'error','error':youtube_cookies.user_error(error,url,DATA) if url else str(error)[-700:]})
-        threading.Thread(target=work,daemon=True).start();return {'job':job}
+        processing.start(job,work,state,on_busy=lambda:DATA.joinpath(job+'.state.json').unlink(missing_ok=True));return {'job':job}
 
     @app.get('/analysis/{job}')
     def analysis_status(job:str):

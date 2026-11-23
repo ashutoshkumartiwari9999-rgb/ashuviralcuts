@@ -42,7 +42,7 @@ def _load(WhisperModel,spec,data):
             list(m.transcribe(__import__('numpy').zeros(16000,dtype='float32'))[0])   # prove cuDNN/cuBLAS really load
             return m
         except Exception:pass
-    return WhisperModel(spec,device='cpu',compute_type='int8',cpu_threads=(os.cpu_count() or 4),download_root=str(data/'models'))
+    return WhisperModel(spec,device='cpu',compute_type='int8',cpu_threads=2,download_root=str(data/'models'))
 def ascii_fold(text):
     """Hinglish is written in plain English letters: fold accents (nosga, funcao) and drop stray non-Latin symbols Whisper hallucinates."""
     import unicodedata
@@ -61,22 +61,9 @@ def collapse_repeats(words,limit=3):
         out.append(w)
     return out
 
-TURBO_FILES=('model.bin','config.json','tokenizer.json','vocabulary.json')
 def _turbo_spec():
-    """Path of a COMPLETE large-v3-turbo snapshot. A half-finished download (only model.bin) used to fail every job with
-    "Cannot load the vocabulary from the model directory", so an incomplete one is repaired (missing small files only)."""
-    repo='mobiuslabsgmbh/faster-whisper-large-v3-turbo'
-    snaps=Path.home()/('.cache/huggingface/hub/models--'+repo.replace('/','--')+'/snapshots')
-    def complete():
-        return [p for p in snaps.glob('*') if all((p/f).exists() for f in TURBO_FILES)]
-    ok=complete()
-    if not ok:
-        try:
-            from huggingface_hub import snapshot_download
-            snapshot_download(repo)
-            ok=complete()
-        except Exception:pass
-    return str(ok[0]) if ok else 'small'
+    """Use a small CPU model by default; large model downloads exceed Free RAM."""
+    return 'base'
 
 LOCK=threading.Lock()
 

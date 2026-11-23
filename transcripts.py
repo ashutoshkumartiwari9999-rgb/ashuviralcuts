@@ -1,6 +1,7 @@
 """Search a source transcript and choose passages without repeating highlight analysis."""
 import hashlib
 import json
+import processing
 import math
 import threading
 import unicodedata
@@ -105,7 +106,7 @@ def attach(app,data,state,probe,transcribe):
             except Exception as error:state[job]={'status':'error','error':str(error)[-500:]}
             finally:
                 with lock:active.pop(key,None)
-        threading.Thread(target=work,daemon=True).start();return {'job':job}
+        processing.start(job,work,state,on_busy=lambda:active.pop(key,None));return {'job':job}
     @app.post('/transcripts/search')
     def find(body:dict):
         record=read(str(body.get('key','')));query=str(body.get('query',''))
