@@ -62,6 +62,9 @@ class OwnerAdminTests(unittest.TestCase):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="https://testserver") as client:
                 response = await client.get("/admin/api/overview")
                 self.assertEqual(response.status_code, 401)
+                response = await client.get("/admin", headers={"accept": "text/html"}, follow_redirects=False)
+                self.assertEqual(response.status_code, 303)
+                self.assertTrue(response.headers["location"].startswith("/login?next=/admin"))
                 response = await client.post("/public-write")
                 self.assertEqual(response.status_code, 200)
                 response = await client.post("/auth/login", json={"password": self.password})
@@ -73,6 +76,11 @@ class OwnerAdminTests(unittest.TestCase):
                 response = await client.get("/admin")
                 self.assertEqual(response.status_code, 200)
                 self.assertIn("OWNER ADMIN", response.text)
+                self.assertIn("YouTube cookies", response.text)
+                self.assertIn("youtube-cookie-choose", response.text)
+                self.assertIn('/assets/youtube-cookies.js?v=6" defer', response.text)
+                self.assertIn("grid-template-columns:repeat(2,minmax(0,1fr))", response.text)
+                self.assertIn("@media(max-width:700px)", response.text)
 
         asyncio.run(exercise())
 

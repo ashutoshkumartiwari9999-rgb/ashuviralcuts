@@ -35,24 +35,58 @@ class AppSmokeTests(unittest.TestCase):
                         self.assertIn("ASHUVIRALCUTS", dashboard.text)
                         self.assertIn("ashutoshkumartiwari9999-rgb", dashboard.text)
                         self.assertIn("ashutosh_official9", dashboard.text)
-                        self.assertIn("Upload YouTube cookies.txt", dashboard.text)
-                        self.assertIn("Owner only · private", dashboard.text)
-                        self.assertIn('href="/login?next=/"', dashboard.text)
-                        self.assertIn('id="youtube-cookie-choose"', dashboard.text)
-                        self.assertIn('>Choose cookies.txt</button>', dashboard.text)
-                        self.assertIn('id="youtube-cookie-upload"', dashboard.text)
-                        self.assertIn('id="youtube-cookie-filename"', dashboard.text)
-                        self.assertIn('/assets/youtube-cookies.js?v=5" defer', dashboard.text)
-                        self.assertIn('/assets/style.css?v=20261122-cookies2"', dashboard.text)
-                        self.assertIn('/assets/app.js?v=20261120-vision1" defer',dashboard.text)
+                        self.assertIn('id="url"', dashboard.text)
+                        self.assertIn('placeholder="Paste a YouTube URL"', dashboard.text)
+                        self.assertIn('id="make"', dashboard.text)
+                        self.assertIn(">Generate clips</button>", dashboard.text)
+                        self.assertIn('id="make-results"', dashboard.text)
+                        self.assertIn('id="make-grid"', dashboard.text)
+                        self.assertIn('id="shorts-settings"', dashboard.text)
+                        self.assertIn('id="shorts-duration-number"', dashboard.text)
+                        self.assertIn('min="10" max="120"', dashboard.text)
+                        self.assertIn('id="aspect"', dashboard.text)
+                        self.assertIn('id="channel-watermark"', dashboard.text)
+                        self.assertIn('id="channel-watermark-position"', dashboard.text)
+                        self.assertIn('id="captions"', dashboard.text)
+                        self.assertIn('/assets/shorts-settings.js?v=20261123-shorts', dashboard.text)
+                        self.assertIn('id="advanced-tools"', dashboard.text)
+                        self.assertNotRegex(dashboard.text, r'id="advanced-tools"[^>]*\bopen')
+                        for owner_only_text in (
+                            "Upload YouTube cookies.txt", "Owner sign-in required",
+                            "Sign in as owner to manage cookies", "Owner only · private",
+                        ):
+                            self.assertNotIn(owner_only_text, dashboard.text)
+                        self.assertNotIn("youtube-cookie-", dashboard.text)
+                        self.assertNotIn("/admin", dashboard.text)
+                        self.assertIn('/assets/style.css?v=20261123-shorts"', dashboard.text)
+                        self.assertIn('/assets/app.js?v=20261123-shorts" defer',dashboard.text)
+                        frontend = await client.get("/assets/app.js")
+                        self.assertEqual(frontend.status_code, 200)
+                        self.assertNotIn("iamajmeena/neonclipping", frontend.text)
+                        self.assertIn("clip_duration:duration", frontend.text)
+                        self.assertIn("channel_watermark_pos", frontend.text)
+                        shorts_settings = await client.get("/assets/shorts-settings.js")
+                        self.assertEqual(shorts_settings.status_code, 200)
+                        self.assertIn("pair(durationRange, durationNumber, 10, 120)", shorts_settings.text)
 
                         phone = await client.get("/m")
                         self.assertEqual(phone.status_code, 200)
                         self.assertIn("Phone Remote", phone.text)
+                        self.assertIn("Paste a YouTube URL", phone.text)
+                        self.assertIn('id="length" type="range" min="10" max="120"', phone.text)
+                        self.assertIn('id="length-value">30</output>', phone.text)
+                        self.assertIn("Live clipping tools", phone.text)
+                        self.assertIn('/assets/mobile.js?v=20261123-shorts"', phone.text)
+                        self.assertNotIn("youtube-cookie-", phone.text)
+                        self.assertNotIn("/admin", phone.text)
                         self.assertEqual((await client.get("/assets/mobile.js")).status_code, 200)
+                        self.assertIn("clip_duration:Number($('length').value)", (await client.get("/assets/mobile.js")).text)
                         self.assertEqual((await client.get("/assets/security.js")).status_code, 200)
                         self.assertEqual((await client.get("/assets/admin.js")).status_code, 200)
                         self.assertEqual((await client.get("/assets/storage.js")).status_code, 200)
+                        studio_css = await client.get("/assets/style.css")
+                        self.assertEqual(studio_css.status_code, 200)
+                        self.assertIn("@media(max-width:760px)", studio_css.text)
                         cached_asset=await client.get("/assets/youtube-cookies.js")
                         self.assertEqual(cached_asset.status_code, 200)
                         self.assertIn("max-age=300",cached_asset.headers.get("cache-control",""))
@@ -175,9 +209,11 @@ class AppSmokeTests(unittest.TestCase):
             "words": [{"start": 1.1, "end": 1.4, "text": "hello"}],
             "features": {},
         }
+        export_requests = []
 
-        def completed_export(_body):
-            app_module.state[clip_id] = {"status": "done", "meta": {"duration": 7.0}}
+        def completed_export(body):
+            export_requests.append(body)
+            app_module.state[clip_id] = {"status": "done", "meta": {"duration": 30.0}}
             return {"job": clip_id}
 
         with patch.object(app_module, "probe", return_value={"w": 320, "h": 240, "duration": 30.0}), \
@@ -191,7 +227,10 @@ class AppSmokeTests(unittest.TestCase):
             async def exercise():
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_module.app), base_url="http://testserver") as client:
                     response = await client.post("/make", json={
-                        "id": source_id, "count": 1, "min_len": 20, "max_len": 25,
+                        "id": source_id, "count": 1, "clip_duration": 30,
+                        "aspect": "vertical", "captions": False,
+                        "channel_name": "Ashu Official", "channel_watermark": True,
+                        "channel_watermark_pos": "br", "channel_watermark_size": 5,
                         "moments": [{"start": 1, "end": 8, "title": "Regression clip", "hook": "Test hook"}],
                     })
                     self.assertEqual(response.status_code, 200, response.text)
@@ -204,6 +243,15 @@ class AppSmokeTests(unittest.TestCase):
                         await asyncio.sleep(0.02)
                     self.assertEqual(record.get("status"), "done", record)
                     self.assertEqual(len(record.get("clips", [])), 1)
+                    self.assertEqual(record["clips"][0]["requested_duration"], 30)
+                    self.assertEqual(record["clips"][0]["actual_duration"], 30)
+                    self.assertEqual(len(export_requests), 1)
+                    self.assertEqual(export_requests[0]["end"] - export_requests[0]["start"], 30)
+                    self.assertEqual(export_requests[0]["aspect"], "vertical")
+                    self.assertFalse(export_requests[0]["captions"])
+                    self.assertTrue(export_requests[0]["channel_watermark"])
+                    self.assertEqual(export_requests[0]["channel_watermark_pos"], "br")
+                    self.assertEqual(export_requests[0]["channel_watermark_size"], 5)
                     self.assertNotIn("curation", record.get("error", ""))
 
             try:
@@ -257,18 +305,18 @@ class AppSmokeTests(unittest.TestCase):
         finally:
             youtube_cookies.remove_cookies(app_module.DATA)
 
-    def test_automatic_candidates_are_constrained_to_20_to_25_seconds(self):
+    def test_automatic_candidates_follow_selected_duration_and_fit_source_end(self):
         candidates = [
             {"start": 10, "end": 60, "title": "Long moment"},
             {"start": 95, "end": 100, "title": "Near end"},
-            {"start": 0, "end": 10, "title": "Too short source"},
+            {"start": 0, "end": 10, "title": "Short source"},
         ]
-        fitted = app_module.constrain_clips(candidates, 100, 20, 25)
+        fitted = app_module.constrain_clips(candidates, 100, 30, 30)
         self.assertEqual(len(fitted), 3)
-        for clip in fitted:
-            self.assertGreaterEqual(clip["end"] - clip["start"], 20)
-            self.assertLessEqual(clip["end"] - clip["start"], 25)
-            self.assertLessEqual(clip["end"], 100)
+        self.assertEqual([clip["end"] - clip["start"] for clip in fitted], [30, 30, 30])
+        self.assertTrue(all(clip["end"] <= 100 for clip in fitted))
+        source_too_short = app_module.constrain_clips([{"start": 0, "end": 5}], 5, 30, 30)
+        self.assertEqual(source_too_short[0]["end"] - source_too_short[0]["start"], 5)
 
 
 if __name__ == "__main__":

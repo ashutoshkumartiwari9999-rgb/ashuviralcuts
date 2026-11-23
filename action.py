@@ -13,25 +13,27 @@ import cv2
 W, H, FPS = 160, 90, 6
 
 
-def analyze(path, start, dur):
+def analyze(path, start, dur, include_motion=True):
     cmd = ['ffmpeg', '-v', 'error', '-ss', f'{max(0, start):.2f}', '-t', f'{dur:.2f}', '-i', str(path), '-an',
            '-vf', f'fps={FPS},scale={W}:{H}', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1']
     raw = subprocess.run(cmd, capture_output=True).stdout
     size = W * H * 3
     n = len(raw) // size
     if n < 4:
-        return {'motion': 0.0, 'flash': 0.0, 'strobe': 0.0, 'cuts': 0.0}
+        return {'motion': 0.0 if include_motion else None, 'flash': 0.0, 'strobe': 0.0, 'cuts': 0.0 if include_motion else None}
     frames = np.frombuffer(raw[:n * size], np.uint8).reshape(n, H, W, 3)
     gray = frames.mean(axis=3).astype(np.uint8)
     lum = gray.reshape(n, -1).mean(axis=1)
-    flows, cuts = [], 0
-    for i in range(1, n):
-        if float(np.mean(cv2.absdiff(gray[i], gray[i - 1]))) > 38:
-            cuts += 1
-            continue
-        f = cv2.calcOpticalFlowFarneback(gray[i - 1], gray[i], None, .5, 2, 9, 2, 5, 1.1, 0)
-        flows.append(float(np.percentile(np.hypot(f[..., 0], f[..., 1]), 90)))
-    motion = float(np.mean(flows)) if flows else 0.0
+    motion, cuts = None, None
+    if include_motion:
+        flows, cuts = [], 0
+        for i in range(1, n):
+            if float(np.mean(cv2.absdiff(gray[i], gray[i - 1]))) > 38:
+                cuts += 1
+                continue
+            f = cv2.calcOpticalFlowFarneback(gray[i - 1], gray[i], None, .5, 2, 9, 2, 5, 1.1, 0)
+            flows.append(float(np.percentile(np.hypot(f[..., 0], f[..., 1]), 90)))
+        motion = float(np.mean(flows)) if flows else 0.0
     # flash: luminance jump up (>= 18 levels in one step) followed by a drop = a short bright burst, not a cut
     d = np.diff(lum)
     flash_events = int(np.sum((d[:-1] > 28) & (d[1:] < -10)))
@@ -46,8 +48,8 @@ def analyze(path, start, dur):
     alternations = int(np.sum(nz[1:] != nz[:-1])) if len(nz) > 1 else 0
     secs = n / FPS
     return {
-        'motion': float(min(1.0, motion / 8.0)),                 # ~8 px/frame at 160x90 = very fast action
+        'motion': float(min(1.0, motion / 8.0)) if motion is not None else None,  # ~8 px/frame at 160x90 = very fast action
         'flash': float(min(1.0, flash_events / max(secs / 6.0, 1.0) / 3.0)),
         'strobe': float(min(1.0, alternations / max(secs, 1.0) / 1.5)),
-        'cuts': float(min(1.0, cuts / max(secs / 4.0, 1.0))),
+        'cuts': float(min(1.0, cuts / max(secs / 4.0, 1.0))) if cuts is not None else None,
     }

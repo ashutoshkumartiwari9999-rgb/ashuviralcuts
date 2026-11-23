@@ -17,7 +17,8 @@ from pathlib import Path
 
 KEYS = ('template', 'tpl_name', 'tpl_handle', 'bg_mode', 'bg_color', 'bg_color2', 'bg_image', 'bg_dim', 'bg_blur', 'padding', 'radius',
         'watermark_image', 'watermark_pos', 'watermark_size', 'watermark_opacity', 'credit', 'outro_text', 'outro_seconds',
-        'music', 'music_volume', 'music_peak', 'music_riser', 'caption_anim')
+        'music', 'music_volume', 'music_peak', 'music_riser', 'caption_anim',
+        'channel_name', 'channel_watermark', 'channel_watermark_pos', 'channel_watermark_size')
 TEMPLATES = ('none', 'x_light', 'x_dark', 'tiktok_hook', 'breaking_news')
 BG_MODES = ('blur', 'color', 'gradient', 'image')
 WM_POS = ('tl', 'tr', 'bl', 'br')
@@ -137,7 +138,7 @@ class Plan:
 
     @property
     def active(self):
-        return any((self.template != 'none', self.bg_mode, self.padding > 0, self.watermark, self.music, self.credit, self.outro_text))
+        return any((self.template != 'none', self.bg_mode, self.padding > 0, self.watermark, self.music, self.credit, self.outro_text, self.channel_watermark))
 
     # ---- video graph
     def graph(self, base_graph, src, width, height, duration):
@@ -274,6 +275,16 @@ class Plan:
             ev += self.template_over
         if self.credit:
             ev.append(f'Dialogue: 3,0:00:00.00,9:59:59.00,Main,,0,0,0,,{{\\an7\\pos({int(W * .055)},{int(H * .135)})\\fs{round(36 * s)}\\b1\\bord3\\shad1\\c&H00FFFFFF&\\3c&H00000000&\\1a&H30&}}{self.credit}')
+        if self.channel_watermark and self.channel_name:
+            pos = {
+                'tl': (int(W * .055), int(H * .075), 7),
+                'tr': (int(W * .945), int(H * .075), 9),
+                'bl': (int(W * .055), int(H * .92), 1),
+                'br': (int(W * .945), int(H * .92), 3),
+            }[self.channel_watermark_pos]
+            x, y, align = pos
+            size = max(14, round(W * self.channel_watermark_size / 100))
+            ev.append(f'Dialogue: 6,0:00:00.00,9:59:59.00,Main,,0,0,0,,{{\\an{align}\\pos({x},{y})\\fs{size}\\b1\\bord3\\shad1\\c&H00FFFFFF&\\3c&H00000000&\\1a&H30&}}{self.channel_name}')
         if self.outro_text and duration > self.outro_seconds + 1:
             t0 = duration - self.outro_seconds
             y = round(H * .66)
@@ -359,6 +370,10 @@ def plan(body, data):
         bg_image=None, watermark=None, music=None,
         watermark_pos=str(body.get('watermark_pos') or 'tr'), watermark_size=number(body.get('watermark_size'), 16, 5, 40, 'Watermark size'),
         watermark_opacity=number(body.get('watermark_opacity'), 0.85, 0.1, 1, 'Watermark opacity'),
+        channel_name=text_field(body.get('channel_name'), 40, 'channel name'),
+        channel_watermark=bool(body.get('channel_watermark', False)),
+        channel_watermark_pos=str(body.get('channel_watermark_pos') or 'tr'),
+        channel_watermark_size=number(body.get('channel_watermark_size'), 4, 1, 10, 'Channel watermark size'),
         credit=text_field(body.get('credit'), 60, 'credit'),
         outro_text=text_field(body.get('outro_text'), 40, 'outro'), outro_seconds=number(body.get('outro_seconds'), 3, 1.5, 8, 'Outro length'),
         music_volume=number(body.get('music_volume'), 0.15, 0, 1, 'Music volume'), music_peak=number(body.get('music_peak'), 0.85, 0, 1, 'Peak volume'),
@@ -367,6 +382,10 @@ def plan(body, data):
     )
     if spec['watermark_pos'] not in WM_POS:
         raise ValueError('Watermark position must be tl, tr, bl or br.')
+    if spec['channel_watermark_pos'] not in WM_POS:
+        raise ValueError('Channel watermark position must be tl, tr, bl or br.')
+    if spec['channel_watermark'] and not spec['channel_name']:
+        raise ValueError('Enter a channel name before enabling its watermark.')
     for key, field, kind in (('bg_image', 'bg_image', 'image'), ('watermark', 'watermark_image', 'image'), ('music', 'music', 'audio')):
         if body.get(field):
             p = asset_path(data, body.get(field), kind)

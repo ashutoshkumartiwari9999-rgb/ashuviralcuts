@@ -1,5 +1,6 @@
 (function () {
   const $ = id => document.getElementById(id);
+  $('length').addEventListener('input', () => { $('length-value').textContent = $('length').value; });
   let liveId = null, liveTimer = null;
   const request = async (path, body) => {
     const response = await fetch(path, body === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -62,7 +63,7 @@
   $('make').addEventListener('click', async () => {
     const button = $('make'); button.disabled = true; $('make-status').textContent = 'Starting…'; $('make-clips').replaceChildren();
     try {
-      const {job} = await request('/make', {url:$('make-url').value, count:Number($('count').value), min_len:15, max_len:Number($('length').value), layout:'blur', caption_style:'gta'});
+      const {job} = await request('/make', {url:$('make-url').value, count:Number($('count').value), clip_duration:Number($('length').value), layout:'blur', aspect:'vertical', caption_style:'gta'});
       while (true) {
         const state = await request('/status/' + encodeURIComponent(job));
         $('make-status').textContent = state.stage || state.message || state.status || 'Working…';

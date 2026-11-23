@@ -7,12 +7,16 @@ import unittest
 import uuid
 import wave
 from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
 
 from fastapi import HTTPException
 from fastapi import FastAPI
 import httpx
 
 import highlights
+import action
 import jobs
 import processing
 
@@ -136,13 +140,33 @@ class ProcessingGateTests(unittest.TestCase):
         self.assertIsNone(processing.active_owner())
         self.assertNotIn("start-failure", state)
 
-    def test_clip_ranges_are_always_twenty_to_twenty_five_seconds(self):
-        self.assertEqual(processing.clip_length_bounds(30, 60), (25, 25))
-        self.assertEqual(processing.clip_length_bounds(15, 24), (20, 24))
-        self.assertEqual(processing.fit_clip_range(10, 60, 90), (22.5, 47.5))
-        self.assertEqual(processing.fit_clip_range(95, 100, 100), (80.0, 100.0))
-        self.assertIsNone(processing.fit_clip_range(0, 19, 19))
-        self.assertTrue(math.isclose(25.0, processing.fit_clip_range(0, 60, 90)[1] - processing.fit_clip_range(0, 60, 90)[0]))
+    def test_selected_clip_duration_10_30_120_and_early_source_end(self):
+        for duration in (10, 30, 120):
+            self.assertEqual(processing.clip_length_bounds(duration, duration), (duration, duration))
+            fitted = processing.fit_clip_range(10, 80, 240, duration, duration)
+            self.assertIsNotNone(fitted)
+            self.assertTrue(math.isclose(duration, fitted[1] - fitted[0]))
+        self.assertEqual(processing.fit_clip_range(0, 45, 45, 120, 120), (0.0, 45.0))
+        self.assertEqual(processing.fit_clip_range(95, 100, 100, 30, 30), (70.0, 100.0))
+        self.assertIsNone(processing.fit_clip_range(0, 0, 19))
+        self.assertEqual(processing.clip_length_bounds(20, 25), (20, 25))
+        for invalid in (9, 121):
+            with self.assertRaises(ValueError):
+                processing.clip_length_bounds(invalid, invalid)
+
+    def test_reused_motion_skips_redundant_candidate_optical_flow(self):
+        frames = np.zeros((12, 90, 160, 3), dtype=np.uint8)
+        frames[4:7, :, :, 0] = 255
+        frames[7:, :, :, 2] = 255
+        completed = type('Completed', (), {'stdout': frames.tobytes()})()
+        with patch.object(action.subprocess, 'run', return_value=completed), \
+             patch.object(action.cv2, 'calcOpticalFlowFarneback', side_effect=AssertionError('duplicate optical flow')) as flow:
+            features = action.analyze('unused-synthetic-input.mp4', 0, 2, include_motion=False)
+        flow.assert_not_called()
+        self.assertIsNone(features['motion'])
+        self.assertIsNone(features['cuts'])
+        self.assertIn('flash', features)
+        self.assertIn('strobe', features)
 
     def test_audio_analysis_decodes_in_bounded_chunks(self):
         with tempfile.TemporaryDirectory(prefix="ashuviralcuts-audio-gate-") as folder:

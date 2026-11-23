@@ -101,7 +101,7 @@ def media(id:str):
  return FileResponse(p,media_type='video/mp4')
 @app.get('/assets/{name}')
 def assets(name:str):
- if name not in ('app.js','style.css','extras.js','transcripts.js','vision.js','security.js','storage.js','mobile.js','youtube-cookies.js','admin.js'):raise HTTPException(404)
+ if name not in ('app.js','style.css','extras.js','transcripts.js','vision.js','security.js','storage.js','mobile.js','shorts-settings.js','youtube-cookies.js','admin.js'):raise HTTPException(404)
  return FileResponse(ROOT/name,headers={'Cache-Control':'public, max-age=300'})
 @app.get('/text/{id}/{kind}')
 def text_file(id:str,kind:str):
@@ -259,8 +259,8 @@ def ai_found(moments,yt_words,duration):
  if not out:raise RuntimeError('None of the pasted moments fit inside this video.')
  return out,'AI answer'
 
-def constrain_clips(found,duration,min_len=20,max_len=25):
- """Keep automatic and supplied candidates inside the requested short-clip window."""
+def constrain_clips(found,duration,min_len=30,max_len=30):
+ """Fit candidates to the requested duration, shortening only when source media ends."""
  clips=[]
  for candidate in found:
   try:original_start=float(candidate.get('start'))
@@ -289,8 +289,13 @@ def make(b:dict):
   except storage.StorageLimitError as e:raise HTTPException(507,str(e)) from e
  try:
   count=max(1,min(12,int(b.get('count',4))))
-  min_len,max_len=processing.clip_length_bounds(b.get('min_len',20),b.get('max_len',25))
- except (TypeError,ValueError,OverflowError):raise HTTPException(400,'Choose a valid clip count and a 20–25 second length range.')
+  if 'clip_duration' in b and b.get('clip_duration') not in (None,''):
+   selected=float(b['clip_duration'])
+   min_len,max_len=processing.clip_length_bounds(selected,selected)
+  else:
+   # Keep older clients and queued jobs compatible with their explicit range.
+   min_len,max_len=processing.clip_length_bounds(b.get('min_len',20),b.get('max_len',25))
+ except (TypeError,ValueError,OverflowError):raise HTTPException(400,'Choose a clip count and a duration between 10 and 120 seconds.')
  moments=b.get('moments')
  if moments is not None:
   if not isinstance(moments,list) or not 1<=len(moments)<=40 or not all(isinstance(m,dict) for m in moments):raise HTTPException(400,'Moments must be a list of 1 to 40 items with start and end.')
@@ -349,7 +354,11 @@ def make(b:dict):
      try:
       f,off=locate(c)
       tmp=f if str(f).startswith(str(DATA)) and Path(f).name.startswith('lr_') else None
-      c['_act']=action.analyze(f,off,c['end']-c['start'])
+      ranked=c.get('features') or {}
+      # highlights.rank has already measured full-source motion/cuts when both are present.
+      # Reuse those signals and only decode the candidate for complementary flash/strobe cues.
+      reuse_ranked_motion=ranked.get('motion') is not None and ranked.get('cuts') is not None
+      c['_act']=action.analyze(f,off,c['end']-c['start'],include_motion=not reuse_ranked_motion)
       if b.get('vision_review'):
        try:c['visual_review']=vision.review(f,off,c['end']-c['start'],DATA,lambda message:save(job,{'stage':message}))
        except Exception as error:c['visual_error']=str(error)[-160:]
@@ -358,11 +367,11 @@ def make(b:dict):
       if tmp:Path(tmp).unlink(missing_ok=True)
     with _TP(max_workers=make_candidate_workers()) as ex:list(ex.map(one,top))
     for key in ('motion','flash','strobe','cuts'):
-     vals=[c['_act'][key] for c in top if c.get('_act')]
+     vals=[c['_act'][key] for c in top if c.get('_act') and c['_act'].get(key) is not None]
      if not vals:continue
      lo,hi=min(vals),max(vals)
      for c in top:
-      if c.get('_act'):
+      if c.get('_act') and c['_act'].get(key) is not None:
        v=c['_act'][key];c['features'][key]=round(.5*v+.5*((v-lo)/(hi-lo) if hi>lo else v),3)
     for c in top:
      if c.get('visual_review'):
@@ -412,6 +421,10 @@ def make(b:dict):
     if not found:
      save(job,{'status':'done','stage':'No moments matched the transcript filters. Broaden the focus or required phrases.','progress':1,'clips':[],'elapsed_seconds':round(time.monotonic()-began,2)});return
     save(job,{'engine':engine,'stage':'Rendering clips','progress':.6,'candidates':len(found)})
+   if not moments:
+    used_headlines=set()
+    for headline_index,candidate in enumerate(found):
+     candidate['title']=curation.clip_headline(candidate.get('transcript',''),candidate.get('title'),used_headlines,headline_index)
    done=[];cam_use,game_use,cam_checked=cam,game,not b.get('cam_auto')
    uploader=str((info.get('channel') or info.get('uploader') or '')) if url else ''
    for i,c in enumerate(found):
@@ -437,26 +450,28 @@ def make(b:dict):
       if fc.get('found'):cam_use,game_use=fc['cam'],fc['game']
      except Exception as e:save(job,{'facecam':{'found':False,'reason':'detection failed: '+str(e)[:80]}})
     lang=language or ('hinglish' if (video_lang.startswith('hi') or c.get('language')=='hi') else None)
-    body={'id':sid2,'start':start,'end':end,'layout':layout,'top':(top_h if isinstance(top_h,(int,float)) and .2<=top_h<=.5 else .32),'captions':True,'caption_style':style,'language':language,'hook':(' '.join(to_hinglish(w) for w in c.get('hook','').split()) if lang=='hinglish' else c.get('hook','')),
+    body={'id':sid2,'start':start,'end':end,'layout':layout,'top':(top_h if isinstance(top_h,(int,float)) and .2<=top_h<=.5 else .32),'captions':b.get('captions',True) is not False,'caption_style':style,'language':language,'hook':(' '.join(to_hinglish(w) for w in c.get('hook','').split()) if lang=='hinglish' else c.get('hook','')),
           'aspect':b.get('aspect','vertical'),'resolution':b.get('resolution',1080),'fps':b.get('fps',0),'title':c.get('title',''),'post_caption':c.get('title',''),'batch_id':job,'source_url':url,'cam':cam_use,'game':game_use,'features':c.get('features'),'weights_used':W,'moment_profile':profile,'focus_brief':focus_brief,'focus_match':c.get('focus_match'),'visual_review':c.get('visual_review')}
     for k in styling.KEYS+brands.KEYS+hooks.KEYS:
      if b.get(k) not in (None,''):body[k]=b[k]
     if b.get('credit_auto') and uploader and not body.get('credit'):body['credit']='Clip: '+uploader[:40]
-    if acc!='fast' or not c.get('words'):
+    if body['captions'] and (acc!='fast' or not c.get('words')):
      # local speech model: only when you ask for Accurate / Best, or the video has no YouTube captions (local files, Twitch)
      save(job,{'stage':f'Accurate captions {i+1}/{len(found)}'})
      body['words']=transcribe(DATA/(sid2+'.mp4'),start,end,DATA,lambda m:None,lang,(large_v3() if acc=='best' else None))['words']
-    else:
+    elif body['captions']:
      ws=c['words']       # YouTube's own captions: better than a local model on game audio, and no waiting
      if lang=='hinglish':
       ws=collapse_repeats([dict(w,text=ascii_fold(to_hinglish(w['text'])).strip()) for w in ws if str(w.get('text','')).strip()])
       ws=[w for w in ws if w['text']]
      body['words']=ws
      save(job,{'caption_source':'YouTube captions' if url else 'Saved full-source transcript'})
+    else:
+     body.pop('words',None)
     ej=export(body)['job']
     while state.get(ej,{}).get('status')=='running':time.sleep(.7)
     r=state[ej]
-    done.append({'viral':min(99,c['score']),'axes':axes(c.get('features') or {}),'file':ej,'start':c['start'],'end':c['end'],'title':c.get('title') or 'Clip %d'%(i+1),'hook':c.get('hook',''),'score':c['score'],'reason':c.get('reason',''),
+    done.append({'viral':max(0,min(100,int(c.get('score',0)))),'axes':axes(c.get('features') or {}),'file':ej,'start':c['start'],'end':c['end'],'actual_duration':round(float((r.get('meta') or {}).get('duration') or end-start),2),'requested_duration':max_len,'title':c.get('title') or 'Clip %d'%(i+1),'hook':c.get('hook',''),'score':c['score'],'reason':c.get('reason',''),
                  'error':r.get('error'),'srt':r.get('srt'),'visual_review':c.get('visual_review')})
     save(job,{'clips':list(done),'stage':f'Rendered {i+1}/{len(found)}','progress':.6+.4*(i+1)/len(found)})
    save(job,{'status':'done','stage':'Clips ready','progress':1,'elapsed_seconds':round(time.monotonic()-began,1)})

@@ -61,6 +61,40 @@ def extract_hook(text, title=""):
     fallbacks = ["WAIT TILL THE END 😱", "THIS MOMENT WAS TOTALLY UNHINGED 🔥", "NO ONE EXPECTED THIS TO HAPPEN 🤯", "WATCH WHAT HAPPENS NEXT..."]
     return fallbacks[h % len(fallbacks)]
 
+def clip_headline(text, existing="", used=None, index=0):
+    """Prefer a supported model title; otherwise use a short, distinct transcript phrase."""
+    used = used if used is not None else set()
+    generic = re.fullmatch(r"(?:activity|dialogue|review|clip)\s+(?:highlight\s+)?(?:candidate\s+)?\d*", str(existing or "").strip(), re.I)
+    if existing and not generic:
+        candidate = " ".join(str(existing).split())[:70]
+        if candidate.casefold() not in used:
+            used.add(candidate.casefold())
+            return candidate
+
+    sentences = [" ".join(part.split()) for part in re.split(r"(?<=[.!?।])\s+|[\r\n]+", str(text or ""))]
+    sentences = [part.strip(" ,;:-") for part in sentences if len(part.split()) >= 3]
+    markers = re.compile(r"\b(but|actually|instead|why|how|because|wait|wrong|mistake|never|finally|secret|lekin|kyun|kaise|galti|pata|achanak|phir)\b", re.I)
+    ranked = sorted(sentences, key=lambda part: (
+        (2 if "?" in part else 0) + (1 if "!" in part else 0) + len(markers.findall(part))
+        - max(0, len(part.split()) - 12) * .08,
+        -abs(len(part.split()) - 7),
+    ), reverse=True)
+    for sentence in ranked:
+        words = sentence.split()
+        candidate = " ".join(words[:7]).strip(" ,;:-")
+        if candidate and candidate.casefold() not in used:
+            if candidate[0].isascii() and candidate[0].isalpha():
+                candidate = candidate[0].upper() + candidate[1:]
+            used.add(candidate.casefold())
+            return candidate[:70]
+    fallback = " ".join(str(existing or "").split())
+    if generic or not fallback:
+        fallback = f"Visual moment {index + 1}"
+    if fallback.casefold() in used:
+        fallback = f"{fallback[:58].rstrip()} · {index + 1}"
+    used.add(fallback.casefold())
+    return fallback[:70]
+
 def hook_supported(hook,text):
     if len(hook.split())<4:return False
     stop={'the','a','an','is','in','of','to','and','with','this','that','for','on','it','his','her','he','she','they','their','my','me','i','you','your','was','are','how','why','what','when','reveals','revealed','unexpected','surprising'}

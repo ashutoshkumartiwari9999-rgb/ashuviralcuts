@@ -125,23 +125,23 @@ def spawn_child(work, name: str = "video-job-child") -> threading.Thread:
     return thread
 
 
-def clip_length_bounds(minimum=20, maximum=25) -> tuple[float, float]:
-    """Clamp automatic clips to the supported 20–25 second range."""
+def clip_length_bounds(minimum=30, maximum=30) -> tuple[float, float]:
+    """Validate the supported automatic Shorts duration range (10–120 seconds)."""
     try:
         low = float(minimum)
         high = float(maximum)
     except (TypeError, ValueError, OverflowError) as error:
-        raise ValueError("Choose a clip length between 20 and 25 seconds.") from error
+        raise ValueError("Choose a clip length between 10 and 120 seconds.") from error
     if not (0 < low < float("inf") and 0 < high < float("inf")):
-        raise ValueError("Choose a clip length between 20 and 25 seconds.")
-    low = max(20.0, min(25.0, low))
-    high = max(20.0, min(25.0, high))
+        raise ValueError("Choose a clip length between 10 and 120 seconds.")
+    if not 10.0 <= low <= 120.0 or not 10.0 <= high <= 120.0:
+        raise ValueError("Choose a clip length between 10 and 120 seconds.")
     if low > high:
         raise ValueError("Minimum clip length cannot exceed maximum clip length.")
     return low, high
 
 
-def fit_clip_range(start, end, duration, minimum=20.0, maximum=25.0) -> tuple[float, float] | None:
+def fit_clip_range(start, end, duration, minimum=10.0, maximum=120.0) -> tuple[float, float] | None:
     """Center a candidate in the requested window and fit it within the source."""
     try:
         start, end, duration = float(start), float(end), float(duration)
@@ -149,11 +149,11 @@ def fit_clip_range(start, end, duration, minimum=20.0, maximum=25.0) -> tuple[fl
         return None
     if not all(value == value and abs(value) != float("inf") for value in (start, end, duration)):
         return None
-    if not 0 <= start < end or duration < minimum:
+    if not 0 <= start < end or duration <= 0:
         return None
-    length = min(maximum, max(minimum, end - start))
-    if length > duration:
-        return None
+    minimum = max(10.0, min(120.0, float(minimum)))
+    maximum = max(minimum, min(120.0, float(maximum)))
+    length = min(duration, maximum, max(minimum, end - start))
     center = (start + end) / 2
     start = max(0.0, min(center - length / 2, duration - length))
     end = start + length
