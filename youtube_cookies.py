@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
+import logging
 import os
 import tempfile
 import threading
@@ -14,14 +15,11 @@ MAX_COOKIE_BYTES = 1024 * 1024
 _LOCK = threading.RLock()
 LOGIN_COOKIE = "LOGIN_INFO"
 AUTH_SIGNATURE_COOKIES = ("SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID")
+_LOG = logging.getLogger(__name__)
 
 
 def _classify_youtube_failure(message: str, logged_categories=()) -> str:
-    """Classify yt-dlp diagnostics without retaining or emitting their raw text."""
-    categories = set(logged_categories or ())
-    for category in ("po_token", "javascript_runtime", "rate_limited", "authentication", "forbidden", "unavailable", "no_formats", "network", "dependency"):
-        if category in categories:
-            return category
+    """Prefer the terminal exception; use captured logger categories only as fallback."""
     lower = str(message).lower()
     if "po token" in lower or "po_token" in lower or "proof of origin" in lower:
         return "po_token"
@@ -45,6 +43,10 @@ def _classify_youtube_failure(message: str, logged_categories=()) -> str:
         return "network"
     if "no module named 'yt_dlp'" in lower or "no module named \"yt_dlp\"" in lower:
         return "dependency"
+    categories = set(logged_categories or ())
+    for category in ("po_token", "javascript_runtime", "rate_limited", "authentication", "forbidden", "unavailable", "no_formats", "network", "dependency"):
+        if category in categories:
+            return category
     return "unknown"
 
 
@@ -281,6 +283,14 @@ class _YoutubeRequest:
                 return getattr(downloader, method)(*args, **kwargs)
         except Exception as error:
             category = _classify_youtube_failure(str(error), diagnostics.categories)
+            # Deliberately log only safe metadata. Raw yt-dlp messages can contain
+            # signed URLs, cookie material, or request tokens.
+            _LOG.warning(
+                "yt-dlp operation failed operation=%s category=%s cookie_fallback=%s",
+                method,
+                category,
+                cookie_file is not None,
+            )
             raise YoutubeDownloadFailure(category) from None
 
     @contextmanager
@@ -347,7 +357,11 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
     if category == "authentication" or any(term in message for term in ("sign in to confirm", "not a bot", "cookies", "login required", "authentication", "confirm your age")):
         status = cookie_state(data_dir)
         if status == "missing":
-            return "YouTube needs a signed-in browser session, but no cookies are configured on this server. Sign in to YouTube, export a fresh Netscape-format cookies.txt, and upload it under Bring your video → YouTube cookies."
+            return (
+                "YouTube challenged the unauthenticated request with a sign-in/bot check before media download. "
+                "This can happen even for a public video and does not prove that the video itself requires sign-in. "
+                "No saved cookie session is available for the optional authentication fallback."
+            )
         if status == "expired":
             return "The saved YouTube cookies have expired. Sign in to YouTube again, export a fresh Netscape-format cookies.txt, and replace them under Bring your video → YouTube cookies."
         if status == "incomplete":

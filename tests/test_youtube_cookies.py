@@ -72,7 +72,8 @@ class YoutubeCookieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             missing = youtube_cookies.user_error(auth_error, url, root)
-            self.assertIn("no cookies are configured", missing)
+            self.assertIn("does not prove that the video itself requires sign-in", missing)
+            self.assertIn("optional authentication fallback", missing)
             path = youtube_cookies.cookie_path(root)
             path.write_text("# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t1\tSID\tprivate-cookie-value\n", encoding="utf-8")
             expired = youtube_cookies.user_error(auth_error, url, root)
@@ -171,6 +172,82 @@ class YoutubeCookieTests(unittest.TestCase):
             self.assertEqual(seen, [False])
             self.assertEqual(caught.exception.youtube_category, "po_token")
             self.assertNotIn("do-not-show", str(caught.exception))
+
+    def test_terminal_error_category_overrides_incidental_logger_warning(self):
+        cases = (
+            ("HTTP Error 403: Forbidden", "forbidden"),
+            ("HTTP Error 429: Too Many Requests", "rate_limited"),
+            ("Connection timed out", "network"),
+            ("PO Token required", "po_token"),
+            ("No supported JavaScript runtime could be found", "javascript_runtime"),
+        )
+        for terminal_error, expected in cases:
+            with self.subTest(category=expected):
+                logger = youtube_cookies._SafeYtDlpLogger()
+                logger.warning("Sign in to confirm you're not a bot; secret=do-not-log")
+                self.assertEqual(
+                    youtube_cookies._classify_youtube_failure(terminal_error, logger.categories),
+                    expected,
+                )
+        self.assertEqual(
+            youtube_cookies._classify_youtube_failure("yt-dlp stopped", {"authentication"}),
+            "authentication",
+        )
+
+    def test_incidental_auth_warning_does_not_trigger_cookie_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            youtube_cookies.save_cookies(root, SAMPLE)
+            attempts = []
+
+            class FakeDownloader:
+                def __init__(self, options):
+                    self.logger = options["logger"]
+                    attempts.append("cookiefile" in options)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def extract_info(self, *_args, **_kwargs):
+                    self.logger.warning("Sign in to confirm you're not a bot; secret=do-not-log")
+                    raise RuntimeError("HTTP Error 403: Forbidden; signed-token=private")
+
+            with patch("yt_dlp.YoutubeDL", FakeDownloader):
+                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {}) as request:
+                    with self.assertRaises(youtube_cookies.YoutubeDownloadFailure) as caught:
+                        request.extract_info("https://youtube.com/watch?v=abc", download=False)
+
+            self.assertEqual(attempts, [False])
+            self.assertEqual(caught.exception.youtube_category, "forbidden")
+            self.assertNotIn("private", str(caught.exception))
+            self.assertNotIn("do-not-log", str(caught.exception))
+
+    def test_safe_failure_log_records_only_operation_category_and_fallback_flag(self):
+        class FakeDownloader:
+            def __init__(self, options):
+                self.logger = options["logger"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def extract_info(self, *_args, **_kwargs):
+                raise RuntimeError("HTTP Error 403: Forbidden signed-url=do-not-log")
+
+        with tempfile.TemporaryDirectory() as temp, patch("yt_dlp.YoutubeDL", FakeDownloader):
+            with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", Path(temp), {}) as request:
+                with self.assertLogs("youtube_cookies", level="WARNING") as captured:
+                    with self.assertRaises(youtube_cookies.YoutubeDownloadFailure):
+                        request.extract_info("https://youtube.com/watch?v=abc", download=False)
+        logged = "\n".join(captured.output)
+        self.assertIn("operation=extract_info category=forbidden cookie_fallback=False", logged)
+        self.assertNotIn("do-not-log", logged)
+        self.assertNotIn("youtube.com", logged)
 
     def test_actionable_youtube_error_does_not_echo_extractor_details(self):
         message = youtube_cookies.user_error(
