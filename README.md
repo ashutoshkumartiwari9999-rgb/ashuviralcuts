@@ -112,7 +112,7 @@ Free web services may spin down after inactivity, take time to wake up, and have
 | `NEONCLIPPING_AUTH_PASSWORD` | unset | Secret used for private YouTube cookie management; never put it in source control |
 | `NEONCLIPPING_COOKIE_STORE_URL` | unset | Supabase project URL; enables encrypted persistent YouTube cookie storage when all store settings are present |
 | `NEONCLIPPING_COOKIE_STORE_BUCKET` | unset | Name of an existing **private** Supabase Storage bucket |
-| `NEONCLIPPING_COOKIE_STORE_KEY` | unset | Server-only Supabase service-role key; keep in host secrets, never in code or browser settings |
+| `NEONCLIPPING_COOKIE_STORE_KEY` | unset | Server-only Supabase secret API key (`sb_secret_...` preferred; legacy `service_role` JWT is also supported); keep in host secrets, never in code or browser settings |
 | `NEONCLIPPING_COOKIE_ENCRYPTION_KEY` | unset | URL-safe Base64 encoding of a random 32-byte AES-256 key; keep separately in host secrets |
 | `NEONCLIPPING_LAN` | unset | Set to `1` to enable same-Wi-Fi phone remote on local runs |
 | `NEONCLIPPING_MAX_UPLOAD_MB` | `300` | Main video upload limit, clamped to 10–700 MB |

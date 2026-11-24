@@ -18,6 +18,34 @@ SAMPLE = (
 
 
 class YoutubeCookieTests(unittest.TestCase):
+    def test_supabase_server_secret_is_apikey_only_and_legacy_jwt_remains_supported(self):
+        key = base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("=")
+        for api_key, expected_authorization in (
+            ("sb_secret_test-only", None),
+            ("eyJ.legacy-test-only", "Bearer eyJ.legacy-test-only"),
+        ):
+            with self.subTest(api_key_type=api_key.split("_")[0]):
+                env = {
+                    "NEONCLIPPING_COOKIE_STORE_URL": "https://project.supabase.co",
+                    "NEONCLIPPING_COOKIE_STORE_BUCKET": "private-auth",
+                    "NEONCLIPPING_COOKIE_STORE_KEY": api_key,
+                    "NEONCLIPPING_COOKIE_ENCRYPTION_KEY": key,
+                }
+                observed = {}
+
+                class FakeOpener:
+                    def open(self, request, timeout):
+                        observed.update({name.lower(): value for name, value in request.header_items()})
+                        return io.BytesIO(b'{"public":false}')
+
+                with patch.dict(os.environ, env, clear=True), patch(
+                    "youtube_cookie_store.build_opener", return_value=FakeOpener()
+                ):
+                    youtube_cookie_store._request("GET", bucket_info=True)
+
+                self.assertEqual(observed["apikey"], api_key)
+                self.assertEqual(observed.get("authorization"), expected_authorization)
+
     def test_encrypted_remote_cookie_store_survives_local_restart_and_fallback(self):
         key = base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("=")
         env = {

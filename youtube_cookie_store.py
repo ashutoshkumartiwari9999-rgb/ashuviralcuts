@@ -84,10 +84,14 @@ def _request(method: str, *, payload: bytes | None = None, bucket_info: bool = F
     endpoint = f"{url}/storage/v1/object/{quote(bucket, safe='')}/{object_path}"
     headers = {
         "apikey": api_key,
-        "Authorization": "Bearer " + api_key,
         "Content-Type": "application/octet-stream",
         "Cache-Control": "no-store",
     }
+    # Supabase's current sb_secret_* keys are API keys, not JWTs. Sending one
+    # as a Bearer token makes the gateway reject it as an invalid JWT. Legacy
+    # service_role keys are JWTs and still need the Authorization header.
+    if not api_key.startswith("sb_secret_"):
+        headers["Authorization"] = "Bearer " + api_key
     if method == "POST":
         headers["x-upsert"] = "true"
     if method == "DELETE":
