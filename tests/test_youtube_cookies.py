@@ -1,9 +1,13 @@
 import tempfile
 import unittest
+import base64
+import io
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 import youtube_cookies
+import youtube_cookie_store
 
 
 SAMPLE = (
@@ -14,6 +18,142 @@ SAMPLE = (
 
 
 class YoutubeCookieTests(unittest.TestCase):
+    def test_encrypted_remote_cookie_store_survives_local_restart_and_fallback(self):
+        key = base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("=")
+        env = {
+            "NEONCLIPPING_COOKIE_STORE_URL": "https://project.supabase.co",
+            "NEONCLIPPING_COOKIE_STORE_BUCKET": "private-auth",
+            "NEONCLIPPING_COOKIE_STORE_KEY": "server-only-test-key",
+            "NEONCLIPPING_COOKIE_ENCRYPTION_KEY": key,
+        }
+        remote = {"body": b""}
+        calls = []
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                target = "bucket" if "/storage/v1/bucket/" in request.full_url else "object"
+                calls.append((request.get_method(), target))
+                if target == "bucket":
+                    return io.BytesIO(b'{"public":false}')
+                if request.get_method() == "POST":
+                    remote["body"] = request.data
+                    if SAMPLE in request.data:
+                        raise AssertionError("cookie fixture was sent without encryption")
+                    return io.BytesIO(b'{"Key":"private"}')
+                if request.get_method() == "GET":
+                    return io.BytesIO(remote["body"])
+                if request.get_method() == "DELETE":
+                    remote["body"] = b""
+                    return io.BytesIO(b'{"message":"deleted"}')
+                self.fail("unexpected remote storage operation")
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, env, clear=False), patch(
+            "youtube_cookie_store.build_opener", return_value=FakeOpener()
+        ):
+            root = Path(temp)
+            youtube_cookies.save_cookies(root, SAMPLE)
+            self.assertFalse(youtube_cookies.cookie_path(root).exists())
+            self.assertEqual(youtube_cookies.cookie_state(root), "available")
+            self.assertEqual(youtube_cookies._stored_cookie_bytes(root), SAMPLE)
+
+            # A simulated Render restart has a new, empty local data folder.
+            restarted = root / "after-restart"
+            restarted.mkdir()
+            self.assertEqual(youtube_cookies.cookie_state(restarted), "available")
+            temp_paths = []
+
+            class FakeDownloader:
+                def __init__(self, options):
+                    cookie_file = options.get("cookiefile")
+                    if cookie_file:
+                        temp_paths.append(Path(cookie_file))
+                        self.assertCookiePrivate = cookie_file.endswith(".txt") and Path(cookie_file).is_file()
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def extract_info(self, *_args, **_kwargs):
+                    if not temp_paths:
+                        raise RuntimeError("Sign in to confirm you're not a bot")
+                    return {"id": "remote-cookie-fallback"}
+
+            with patch("yt_dlp.YoutubeDL", FakeDownloader):
+                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", restarted, {}) as request:
+                    result = request.extract_info("https://youtube.com/watch?v=abc", download=False)
+            self.assertEqual(result["id"], "remote-cookie-fallback")
+            self.assertEqual(len(temp_paths), 1)
+            self.assertFalse(temp_paths[0].exists())
+            self.assertIn(("POST", "object"), calls)
+            youtube_cookies.remove_cookies(restarted)
+            self.assertEqual(calls[-1], ("DELETE", "object"))
+            self.assertEqual(youtube_cookies.cookie_state(restarted), "missing")
+
+    def test_partial_or_invalid_persistent_store_configuration_fails_closed(self):
+        partial = {"NEONCLIPPING_COOKIE_STORE_URL": "https://project.supabase.co"}
+        with patch.dict(os.environ, partial, clear=True):
+            self.assertEqual(youtube_cookies.cookie_state(Path("unused")), "storage_unavailable")
+            with self.assertRaisesRegex(ValueError, "configuration is incomplete"):
+                youtube_cookies.save_cookies(Path("unused"), SAMPLE)
+
+    def test_storage_credentials_are_never_sent_to_non_supabase_host(self):
+        env = {
+            "NEONCLIPPING_COOKIE_STORE_URL": "https://attacker.example",
+            "NEONCLIPPING_COOKIE_STORE_BUCKET": "private-auth",
+            "NEONCLIPPING_COOKIE_STORE_KEY": "server-only-test-key",
+            "NEONCLIPPING_COOKIE_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("="),
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with self.assertRaisesRegex(ValueError, "valid Supabase HTTPS project URL"):
+                youtube_cookies.save_cookies(Path("unused"), SAMPLE)
+
+    def test_remote_storage_outage_is_not_reported_as_missing_or_logged(self):
+        key = base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("=")
+        env = {
+            "NEONCLIPPING_COOKIE_STORE_URL": "https://project.supabase.co",
+            "NEONCLIPPING_COOKIE_STORE_BUCKET": "private-auth",
+            "NEONCLIPPING_COOKIE_STORE_KEY": "server-only-test-key",
+            "NEONCLIPPING_COOKIE_ENCRYPTION_KEY": key,
+        }
+        class OfflineStore:
+            def open(self, *_args, **_kwargs):
+                raise OSError("secret-bearing provider response")
+
+        with patch.dict(os.environ, env, clear=True), patch(
+            "youtube_cookie_store.build_opener", return_value=OfflineStore()
+        ):
+            self.assertEqual(youtube_cookies.cookie_state(Path("unused")), "storage_unavailable")
+            message = youtube_cookies.user_error(
+                youtube_cookies.YoutubeDownloadFailure("authentication"),
+                "https://youtube.com/watch?v=abc",
+                Path("unused"),
+            )
+        self.assertIn("private cookie store is unavailable", message)
+        self.assertNotIn("secret-bearing", message)
+
+    def test_public_bucket_is_rejected_before_cookie_upload(self):
+        key = base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("=")
+        env = {
+            "NEONCLIPPING_COOKIE_STORE_URL": "https://project.supabase.co",
+            "NEONCLIPPING_COOKIE_STORE_BUCKET": "private-auth",
+            "NEONCLIPPING_COOKIE_STORE_KEY": "server-only-test-key",
+            "NEONCLIPPING_COOKIE_ENCRYPTION_KEY": key,
+        }
+
+        class PublicBucketOpener:
+            def open(self, request, timeout):
+                if request.get_method() == "POST":
+                    raise AssertionError("must not upload into a public bucket")
+                return io.BytesIO(b'{"public":true}')
+
+        with tempfile.TemporaryDirectory() as temp, patch.dict(os.environ, env, clear=True), patch(
+            "youtube_cookie_store.build_opener", return_value=PublicBucketOpener()
+        ):
+            with self.assertRaisesRegex(ValueError, "not private"):
+                youtube_cookies.save_cookies(Path(temp), SAMPLE)
+
     def test_cookie_validation_requires_netscape_youtube_entry(self):
         parsed = youtube_cookies.validate_cookie_text(SAMPLE)
         self.assertIn("test-login-cookie", parsed)
@@ -202,10 +342,38 @@ class YoutubeCookieTests(unittest.TestCase):
             self.assertEqual(caught.exception.youtube_category, "po_token")
             self.assertNotIn("do-not-show", str(caught.exception))
 
+    def test_unusual_traffic_rate_limit_does_not_trigger_cookie_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            youtube_cookies.save_cookies(root, SAMPLE)
+            attempts = []
+
+            class FakeDownloader:
+                def __init__(self, options):
+                    attempts.append("cookiefile" in options)
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_):
+                    return False
+
+                def extract_info(self, *_args, **_kwargs):
+                    raise RuntimeError("YouTube detected unusual traffic")
+
+            with patch("yt_dlp.YoutubeDL", FakeDownloader):
+                with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {}) as request:
+                    with self.assertRaises(youtube_cookies.YoutubeDownloadFailure) as caught:
+                        request.extract_info("https://youtube.com/watch?v=abc", download=False)
+
+            self.assertEqual(attempts, [False])
+            self.assertEqual(caught.exception.youtube_category, "rate_limited")
+
     def test_terminal_error_category_overrides_incidental_logger_warning(self):
         cases = (
             ("HTTP Error 403: Forbidden", "forbidden"),
             ("HTTP Error 429: Too Many Requests", "rate_limited"),
+            ("YouTube detected unusual traffic", "rate_limited"),
             ("Sign in to confirm you're not a bot", "bot_challenge"),
             ("Connection timed out", "network"),
             ("PO Token required", "po_token"),

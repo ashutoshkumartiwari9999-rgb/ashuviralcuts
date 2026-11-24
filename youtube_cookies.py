@@ -29,11 +29,10 @@ def _classify_youtube_failure(message: str, logged_categories=()) -> str:
         "ejs challenge solver", "challenge solver script",
     )):
         return "javascript_runtime"
-    if "429" in lower or "too many requests" in lower or "rate limit" in lower:
+    if "429" in lower or "too many requests" in lower or "rate limit" in lower or "unusual traffic" in lower:
         return "rate_limited"
     if any(term in lower for term in (
         "not a bot", "automated requests", "automated traffic", "bot challenge",
-        "unusual traffic",
     )):
         return "bot_challenge"
     if any(term in lower for term in ("sign in to confirm", "login required", "authentication", "confirm your age", "cookies are no longer valid")):
@@ -174,24 +173,33 @@ def cookie_path(data_dir: Path) -> Path:
 
 
 def has_cookies(data_dir: Path) -> bool:
+    return cookie_state(data_dir) == "available"
+
+
+def _stored_cookie_bytes(data_dir: Path) -> bytes | None:
+    """Read local dev storage or decrypt the configured private remote object."""
+    import youtube_cookie_store
+    if youtube_cookie_store.configured():
+        return youtube_cookie_store.get()
     path = cookie_path(data_dir)
     try:
-        return path.is_file() and path.stat().st_size > 0
+        return path.read_bytes() if path.is_file() else None
     except OSError:
-        return False
+        return None
 
 
 def cookie_state(data_dir: Path | None, now: float | None = None) -> str:
     """Return only non-sensitive cookie availability/expiry metadata."""
     if data_dir is None:
         return "unknown"
-    path = cookie_path(data_dir)
     try:
-        if not path.is_file() or path.stat().st_size == 0:
+        raw = _stored_cookie_bytes(Path(data_dir))
+        if raw is None or not raw:
             return "missing"
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError):
-        return "unavailable"
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError, ValueError, RuntimeError):
+        import youtube_cookie_store
+        return "storage_unavailable" if youtube_cookie_store.configured() else "unavailable"
     timestamp = time.time() if now is None else now
     youtube_expiries = []
     active_youtube_cookie_names = set()
@@ -222,6 +230,15 @@ def save_cookies(data_dir: Path, raw: bytes) -> None:
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     destination = cookie_path(data_dir)
+    import youtube_cookie_store
+    try:
+        if youtube_cookie_store.configured():
+            youtube_cookie_store.put(text.encode("utf-8"))
+            # Do not leave a plaintext persistent copy on Render's ephemeral disk.
+            destination.unlink(missing_ok=True)
+            return
+    except youtube_cookie_store.CookieStoreError as error:
+        raise ValueError(str(error)) from None
     fd, temp_name = tempfile.mkstemp(prefix=".youtube-cookies-", suffix=".upload", dir=data_dir)
     temp = Path(temp_name)
     try:
@@ -242,7 +259,13 @@ def save_cookies(data_dir: Path, raw: bytes) -> None:
 
 
 def remove_cookies(data_dir: Path) -> None:
+    import youtube_cookie_store
     with _LOCK:
+        if youtube_cookie_store.configured():
+            try:
+                youtube_cookie_store.delete()
+            except youtube_cookie_store.CookieStoreError as error:
+                raise RuntimeError(str(error)) from None
         cookie_path(data_dir).unlink(missing_ok=True)
 
 
@@ -300,12 +323,12 @@ class _YoutubeRequest:
 
     @contextmanager
     def _private_cookie_copy(self):
-        source = cookie_path(self.data_dir)
         temp_cookie = None
         try:
             if cookie_state(self.data_dir) == "available":
                 with _LOCK:
-                    if source.is_file():
+                    raw = _stored_cookie_bytes(self.data_dir)
+                    if raw:
                         fd, name = tempfile.mkstemp(prefix=".yt-cookie-", suffix=".txt", dir=self.data_dir)
                         temp_cookie = Path(name)
                         try:
@@ -313,7 +336,7 @@ class _YoutubeRequest:
                         except OSError:
                             pass
                         with os.fdopen(fd, "wb") as output:
-                            output.write(source.read_bytes())
+                            output.write(raw)
             yield temp_cookie
         finally:
             if temp_cookie:
@@ -354,6 +377,8 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
         return "YouTube rate-limited this request (HTTP 429 or equivalent). This can be an account or shared server-IP limit. Wait before retrying; repeated attempts may extend the block."
     if category == "bot_challenge":
         status = cookie_state(data_dir)
+        if status == "storage_unavailable":
+            return "YouTube challenged this server request as automated traffic, and the configured private cookie store is unavailable. No session data was sent; retry when that store is reachable."
         if status == "available":
             return (
                 "YouTube explicitly challenged this request as automated traffic. The unauthenticated attempt and the one optional saved-session fallback were rejected. "
@@ -376,6 +401,8 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
         return "The YouTube downloader dependency is missing in this deployment. Rebuild the service from its pinned requirements."
     if category == "authentication" or any(term in message for term in ("sign in to confirm", "not a bot", "cookies", "login required", "authentication", "confirm your age")):
         status = cookie_state(data_dir)
+        if status == "storage_unavailable":
+            return "YouTube requested sign-in, but the configured private cookie store is unavailable. No session data was sent; retry when that store is reachable."
         if status == "missing":
             return (
                 "YouTube challenged the unauthenticated request with a sign-in/bot check before media download. "
