@@ -347,7 +347,8 @@ class YoutubeCookieTests(unittest.TestCase):
         self.assertEqual(caught.exception.youtube_category, "bot_challenge")
         self.assertIn("explicitly challenged", message)
         self.assertIn("distinct from a video being private", message)
-        self.assertNotIn("Netscape cookies.txt", message)
+        self.assertIn("upload the video file here", message)
+        self.assertNotIn("saved owner session", message)
 
     def test_bot_challenge_cooldown_prevents_repeated_youtube_requests(self):
         attempts = []
@@ -379,6 +380,7 @@ class YoutubeCookieTests(unittest.TestCase):
         self.assertEqual(attempts, [False])
         message = youtube_cookies.user_error(second.exception, "https://youtube.com/watch?v=def", root)
         self.assertIn("pausing new YouTube requests", message)
+        self.assertIn("uploading the video file here", message)
 
     def test_new_owner_session_clears_bot_challenge_cooldown(self):
         youtube_cookies._mark_bot_challenge()
@@ -540,6 +542,7 @@ class YoutubeCookieTests(unittest.TestCase):
             ("HTTP Error 403: Forbidden", "denied the media request"),
             ("Private video. Sign in if you've been granted access.", "identifies this video as private"),
             ("Sign in to confirm you're not a bot", "explicitly challenged"),
+            ("Sign in to confirm you're not a bot", "upload the video file here"),
             ("Requested format is not available", "returned no format"),
         )
         url = "https://www.youtube.com/watch?v=abc"

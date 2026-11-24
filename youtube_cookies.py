@@ -404,7 +404,7 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
     if category == "bot_cooldown":
         remaining = _cooldown_remaining()
         minutes = max(1, (remaining + 59) // 60)
-        return f"YouTube recently challenged this server. To avoid extending the block, AshuViralCuts is pausing new YouTube requests for about {minutes} minute(s). Try again after the cooldown; this protection resets early if you replace the saved owner session."
+        return f"YouTube recently challenged this server. To avoid extending the block, AshuViralCuts is pausing new YouTube requests for about {minutes} minute(s). You can continue now by downloading the video in your browser and uploading the video file here."
     if category == "javascript_runtime":
         return "YouTube extraction could not solve its JavaScript challenge. This server needs the supported Deno runtime and yt-dlp-ejs component; check the deployment build and retry. No cookie values or yt-dlp log text were exposed."
     if category == "po_token":
@@ -422,8 +422,8 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
             )
         return (
             "YouTube explicitly challenged this server request as automated traffic (the not-a-bot check). "
-            "That is distinct from a video being private or age-restricted. No saved owner session is available for the single optional fallback, "
-            "and the challenge cannot be safely bypassed. Wait before retrying; repeated attempts may extend the block."
+            "That is distinct from a video being private or age-restricted, and AshuViralCuts will not bypass this check. "
+            "To keep clipping, download the video in your browser and upload the video file here."
         )
     if category == "private_video":
         return "YouTube identifies this video as private. A public link cannot be processed unless the owner makes it public; AshuViralCuts cannot access private videos."
