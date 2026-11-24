@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import processing
 
 COOKIE_SAMPLE = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tLOGIN_INFO\ttest-login-cookie\n.youtube.com\tTRUE\t/\tTRUE\t2147483647\tSAPISID\ttest-signature-cookie\n"
 
@@ -196,6 +197,19 @@ class AppSmokeTests(unittest.TestCase):
         started=time.monotonic()
         asyncio.run(exercise())
         self.assertLess(time.monotonic()-started,2.0)
+
+    def test_runtime_reports_reserved_processing_slot_even_before_job_state(self):
+        owner = processing.reserve("runtime-observability-test")
+        self.assertIsNotNone(owner)
+        try:
+            async def exercise():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app_module.app), base_url="http://testserver") as client:
+                    response = await client.get("/runtime")
+                    self.assertEqual(response.status_code, 200)
+                    self.assertTrue(response.json()["processing_active"])
+            asyncio.run(exercise())
+        finally:
+            processing.release(owner)
 
     def test_make_local_source_does_not_shadow_curation(self):
         """Regression: /make must use module-level curation before lazy imports."""

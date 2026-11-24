@@ -19,6 +19,7 @@ import highlights
 import action
 import jobs
 import processing
+import standalone
 
 
 class ProcessingGateTests(unittest.TestCase):
@@ -95,6 +96,69 @@ class ProcessingGateTests(unittest.TestCase):
         finally:
             finish.set()
             queue.close()
+            root.cleanup()
+
+    def test_link_import_stays_running_until_preview_child_releases_shared_slot(self):
+        root = tempfile.TemporaryDirectory(prefix="ashuviralcuts-preview-gate-")
+        data = Path(root.name)
+        app = FastAPI()
+        state = {}
+        preview_started = threading.Event()
+        finish_preview = threading.Event()
+        preview_finished = threading.Event()
+        standalone.attach(app, data, state, lambda _path: {"w": 320, "h": 240, "duration": 60.0})
+
+        class FakeDownloader:
+            def __init__(self, options):
+                self.options = options
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def download(self, _urls):
+                target = Path(self.options["outtmpl"].replace("%(ext)s", "mp4"))
+                target.write_bytes(b"test source")
+
+        def fake_download(_url, _data, options):
+            return FakeDownloader(options)
+
+        def slow_preview(_url, _job, _data, _probe, publish):
+            preview_started.set()
+            finish_preview.wait(3)
+            publish({"preview_status": "ready"})
+            preview_finished.set()
+
+        async def exercise():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+                response = await client.post("/link", json={"url": "https://youtube.com/watch?v=preview-lock"})
+                self.assertEqual(response.status_code, 200, response.text)
+                job = response.json()["job"]
+                self.assertTrue(await asyncio.to_thread(preview_started.wait, 1))
+                await asyncio.sleep(.05)
+                self.assertEqual(state[job]["status"], "running")
+                self.assertIsNotNone(processing.active_owner())
+                finish_preview.set()
+                self.assertTrue(await asyncio.to_thread(preview_finished.wait, 1))
+                deadline = time.monotonic() + 5
+                while state[job].get("status") == "running" and time.monotonic() < deadline:
+                    await asyncio.sleep(.01)
+                self.assertEqual(state[job]["status"], "done", {"record": state[job], "owner_active": processing.active_owner() is not None})
+                release_deadline = time.monotonic() + 2
+                while processing.active_owner() is not None and time.monotonic() < release_deadline:
+                    await asyncio.sleep(.01)
+
+        try:
+            with patch("standalone.prepare", side_effect=slow_preview), patch("standalone.youtube_cookies.youtube_dl", side_effect=fake_download):
+                asyncio.run(exercise())
+            self.assertIsNone(processing.active_owner())
+        finally:
+            finish_preview.set()
+            owner = processing.active_owner()
+            if owner:
+                processing.release(owner)
             root.cleanup()
 
     def test_slot_releases_after_success_failure_timeout_and_cancellation(self):

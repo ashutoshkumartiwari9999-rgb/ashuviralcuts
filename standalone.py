@@ -127,10 +127,14 @@ def attach(app,DATA,state,probe):
         def work():
             preview_thread=processing.spawn_child(preview_work,name=f'video-preview-{job[:8]}')
             try:
-                id,p=download(url,job);save(job,{'status':'done','id':id,**probe(p)})
-            except Exception as error:save(job,{'status':'error','error':'Import failed. '+youtube_cookies.user_error(error,url,DATA)})
+                id,p=download(url,job)
+                result={'status':'done','id':id,**probe(p)}
+            except Exception as error:result={'status':'error','error':'Import failed. '+youtube_cookies.user_error(error,url,DATA)}
             finally:
                 preview_thread.join()
+            # Keep the import marked active until its preview child exits. The
+            # shared processing slot remains reserved through this join.
+            save(job,result)
         processing.start(job,work,state,on_busy=lambda:(DATA.joinpath(job+'.state.json').unlink(missing_ok=True),shutil.rmtree(DATA/(job+'-preview'),ignore_errors=True)));return {'job':job}
 
     @app.get('/preview/{job}/{index}')

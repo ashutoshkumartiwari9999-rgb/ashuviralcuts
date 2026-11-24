@@ -624,7 +624,7 @@ def make_status(job:str):
 def status(id:str):return state.get(id,{'status':'error','error':'Server restarted. Paste the link again to retry.'})
 @app.get('/runtime')
 def runtime():
- return {'active':[{'id':job,'status':row.get('status'),'stage':row.get('stage') or row.get('message','')} for job,row in list(state.items()) if row.get('status') in ('running','queued','starting','recording')]}
+ return {'processing_active':processing.active_owner() is not None,'active':[{'id':job,'status':row.get('status'),'stage':row.get('stage') or row.get('message','')} for job,row in list(state.items()) if row.get('status') in ('running','queued','starting','recording')]}
 
 @app.get('/storage')
 def storage_status():return storage.summary(DATA)
