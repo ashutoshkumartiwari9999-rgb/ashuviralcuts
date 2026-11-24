@@ -18,6 +18,12 @@ SAMPLE = (
 
 
 class YoutubeCookieTests(unittest.TestCase):
+    def setUp(self):
+        youtube_cookies._clear_bot_challenge_cooldown()
+
+    def tearDown(self):
+        youtube_cookies._clear_bot_challenge_cooldown()
+
     def test_supabase_server_secret_is_apikey_only_and_legacy_jwt_remains_supported(self):
         key = base64.urlsafe_b64encode(b"k" * 32).decode().rstrip("=")
         for api_key, expected_authorization in (
@@ -343,6 +349,44 @@ class YoutubeCookieTests(unittest.TestCase):
         self.assertIn("distinct from a video being private", message)
         self.assertNotIn("Netscape cookies.txt", message)
 
+    def test_bot_challenge_cooldown_prevents_repeated_youtube_requests(self):
+        attempts = []
+
+        class FakeDownloader:
+            def __init__(self, options):
+                attempts.append("cookiefile" in options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def extract_info(self, *_args, **_kwargs):
+                raise RuntimeError("Sign in to confirm you're not a bot")
+
+        with tempfile.TemporaryDirectory() as temp, patch("yt_dlp.YoutubeDL", FakeDownloader):
+            root = Path(temp)
+            with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {}) as request:
+                with self.assertRaises(youtube_cookies.YoutubeDownloadFailure) as first:
+                    request.extract_info("https://youtube.com/watch?v=abc", download=False)
+            with youtube_cookies.youtube_dl("https://youtube.com/watch?v=def", root, {}) as request:
+                with self.assertRaises(youtube_cookies.YoutubeDownloadFailure) as second:
+                    request.extract_info("https://youtube.com/watch?v=def", download=False)
+
+        self.assertEqual(first.exception.youtube_category, "bot_challenge")
+        self.assertEqual(second.exception.youtube_category, "bot_cooldown")
+        self.assertEqual(attempts, [False])
+        message = youtube_cookies.user_error(second.exception, "https://youtube.com/watch?v=def", root)
+        self.assertIn("pausing new YouTube requests", message)
+
+    def test_new_owner_session_clears_bot_challenge_cooldown(self):
+        youtube_cookies._mark_bot_challenge()
+        self.assertGreater(youtube_cookies._cooldown_remaining(), 0)
+        with tempfile.TemporaryDirectory() as temp:
+            youtube_cookies.save_cookies(Path(temp), SAMPLE)
+        self.assertEqual(youtube_cookies._cooldown_remaining(), 0)
+
     def test_cookie_fallback_is_not_used_for_po_token_or_network_failures(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -494,6 +538,7 @@ class YoutubeCookieTests(unittest.TestCase):
             ("PO Token required for GVS request", "Proof-of-Origin (PO) token"),
             ("HTTP Error 429: Too Many Requests", "rate-limited this request"),
             ("HTTP Error 403: Forbidden", "denied the media request"),
+            ("Private video. Sign in if you've been granted access.", "identifies this video as private"),
             ("Sign in to confirm you're not a bot", "explicitly challenged"),
             ("Requested format is not available", "returned no format"),
         )

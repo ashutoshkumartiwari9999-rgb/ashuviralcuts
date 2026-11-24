@@ -13,9 +13,29 @@ from urllib.parse import urlparse
 
 MAX_COOKIE_BYTES = 1024 * 1024
 _LOCK = threading.RLock()
+_BOT_CHALLENGE_COOLDOWN_SECONDS = 5 * 60
+_BOT_CHALLENGE_UNTIL = 0.0
+_BOT_CHALLENGE_LOCK = threading.Lock()
 LOGIN_COOKIE = "LOGIN_INFO"
 AUTH_SIGNATURE_COOKIES = ("SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID")
 _LOG = logging.getLogger(__name__)
+
+
+def _cooldown_remaining() -> int:
+    with _BOT_CHALLENGE_LOCK:
+        return max(0, int(_BOT_CHALLENGE_UNTIL - time.monotonic() + 0.999))
+
+
+def _mark_bot_challenge() -> None:
+    global _BOT_CHALLENGE_UNTIL
+    with _BOT_CHALLENGE_LOCK:
+        _BOT_CHALLENGE_UNTIL = time.monotonic() + _BOT_CHALLENGE_COOLDOWN_SECONDS
+
+
+def _clear_bot_challenge_cooldown() -> None:
+    global _BOT_CHALLENGE_UNTIL
+    with _BOT_CHALLENGE_LOCK:
+        _BOT_CHALLENGE_UNTIL = 0.0
 
 
 def _classify_youtube_failure(message: str, logged_categories=()) -> str:
@@ -37,6 +57,8 @@ def _classify_youtube_failure(message: str, logged_categories=()) -> str:
         return "bot_challenge"
     if any(term in lower for term in ("sign in to confirm", "login required", "authentication", "confirm your age", "cookies are no longer valid")):
         return "authentication"
+    if "private video" in lower or "this video is private" in lower:
+        return "private_video"
     if "403" in lower or "forbidden" in lower or "blocked" in lower:
         return "forbidden"
     if any(term in lower for term in ("video unavailable", "private video", "video has been removed", "404 not found")):
@@ -48,7 +70,7 @@ def _classify_youtube_failure(message: str, logged_categories=()) -> str:
     if "no module named 'yt_dlp'" in lower or "no module named \"yt_dlp\"" in lower:
         return "dependency"
     categories = set(logged_categories or ())
-    for category in ("po_token", "javascript_runtime", "rate_limited", "bot_challenge", "authentication", "forbidden", "unavailable", "no_formats", "network", "dependency"):
+    for category in ("po_token", "javascript_runtime", "rate_limited", "bot_challenge", "authentication", "private_video", "forbidden", "unavailable", "no_formats", "network", "dependency"):
         if category in categories:
             return category
     return "unknown"
@@ -236,6 +258,7 @@ def save_cookies(data_dir: Path, raw: bytes) -> None:
             youtube_cookie_store.put(text.encode("utf-8"))
             # Do not leave a plaintext persistent copy on Render's ephemeral disk.
             destination.unlink(missing_ok=True)
+            _clear_bot_challenge_cooldown()
             return
     except youtube_cookie_store.CookieStoreError as error:
         raise ValueError(str(error)) from None
@@ -254,6 +277,7 @@ def save_cookies(data_dir: Path, raw: bytes) -> None:
                 os.chmod(destination, 0o600)
             except OSError:
                 pass
+        _clear_bot_challenge_cooldown()
     finally:
         temp.unlink(missing_ok=True)
 
@@ -311,6 +335,8 @@ class _YoutubeRequest:
                 return getattr(downloader, method)(*args, **kwargs)
         except Exception as error:
             category = _classify_youtube_failure(str(error), diagnostics.categories)
+            if category == "bot_challenge":
+                _mark_bot_challenge()
             # Deliberately log only safe metadata. Raw yt-dlp messages can contain
             # signed URLs, cookie material, or request tokens.
             _LOG.warning(
@@ -343,8 +369,12 @@ class _YoutubeRequest:
                 temp_cookie.unlink(missing_ok=True)
 
     def _run(self, method: str, *args, **kwargs):
+        if _cooldown_remaining():
+            raise YoutubeDownloadFailure("bot_cooldown")
         try:
-            return self._invoke(method, args, kwargs)
+            result = self._invoke(method, args, kwargs)
+            _clear_bot_challenge_cooldown()
+            return result
         except YoutubeDownloadFailure as first_error:
             # A saved owner session may clear either a genuine sign-in gate or
             # an explicit YouTube bot challenge. Keep the first attempt public
@@ -354,7 +384,9 @@ class _YoutubeRequest:
             with self._private_cookie_copy() as cookie_file:
                 if cookie_file is None:
                     raise
-                return self._invoke(method, args, kwargs, cookie_file)
+                result = self._invoke(method, args, kwargs, cookie_file)
+                _clear_bot_challenge_cooldown()
+                return result
 
     def extract_info(self, *args, **kwargs):
         return self._run("extract_info", *args, **kwargs)
@@ -369,6 +401,10 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
         return str(error)[-700:]
     message = str(error).lower()
     category = getattr(error, "youtube_category", None) or _classify_youtube_failure(message)
+    if category == "bot_cooldown":
+        remaining = _cooldown_remaining()
+        minutes = max(1, (remaining + 59) // 60)
+        return f"YouTube recently challenged this server. To avoid extending the block, AshuViralCuts is pausing new YouTube requests for about {minutes} minute(s). Try again after the cooldown; this protection resets early if you replace the saved owner session."
     if category == "javascript_runtime":
         return "YouTube extraction could not solve its JavaScript challenge. This server needs the supported Deno runtime and yt-dlp-ejs component; check the deployment build and retry. No cookie values or yt-dlp log text were exposed."
     if category == "po_token":
@@ -389,6 +425,8 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
             "That is distinct from a video being private or age-restricted. No saved owner session is available for the single optional fallback, "
             "and the challenge cannot be safely bypassed. Wait before retrying; repeated attempts may extend the block."
         )
+    if category == "private_video":
+        return "YouTube identifies this video as private. A public link cannot be processed unless the owner makes it public; AshuViralCuts cannot access private videos."
     if category == "forbidden":
         return "YouTube denied the media request (HTTP 403). The cause can be a PO-token requirement, an expired stream URL, or a network/IP restriction; the safe diagnostic did not identify which one."
     if category == "unavailable":
