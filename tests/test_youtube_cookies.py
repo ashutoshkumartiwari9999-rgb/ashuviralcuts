@@ -49,7 +49,7 @@ class YoutubeCookieTests(unittest.TestCase):
             )
             self.assertEqual(youtube_cookies.cookie_state(root), "incomplete")
             error = youtube_cookies.user_error(
-                RuntimeError("Sign in to confirm you're not a bot"),
+                RuntimeError("Login required"),
                 "https://www.youtube.com/watch?v=abc",
                 root,
             )
@@ -67,7 +67,7 @@ class YoutubeCookieTests(unittest.TestCase):
             self.assertEqual(youtube_cookies.cookie_state(root, now=100), "expired")
 
     def test_auth_errors_distinguish_missing_expired_and_rejected_cookies(self):
-        auth_error = RuntimeError("Sign in to confirm you're not a bot; do not echo this private-cookie-value")
+        auth_error = RuntimeError("Login required; do not echo this private-cookie-value")
         url = "https://www.youtube.com/watch?v=abc"
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -110,7 +110,7 @@ class YoutubeCookieTests(unittest.TestCase):
                 self.assertNotIn("cookiefile", seen_options[0])
                 self.assertFalse(list(root.glob(".yt-cookie-*.txt")))
 
-    def test_authentication_failure_retries_with_private_cookie_copy_and_cleans_it(self):
+    def test_bot_challenge_retries_once_with_private_cookie_copy_and_cleans_it(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             youtube_cookies.save_cookies(root, SAMPLE)
@@ -146,6 +146,35 @@ class YoutubeCookieTests(unittest.TestCase):
             self.assertFalse(temporary_files[0].exists())
             self.assertFalse(list(root.glob(".yt-cookie-*.txt")))
 
+    def test_bot_challenge_without_saved_session_is_not_mislabeled_as_video_auth(self):
+        attempts = []
+
+        class FakeDownloader:
+            def __init__(self, options):
+                attempts.append("cookiefile" in options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+            def extract_info(self, *_args, **_kwargs):
+                raise RuntimeError("Sign in to confirm you're not a bot")
+
+        with tempfile.TemporaryDirectory() as temp, patch("yt_dlp.YoutubeDL", FakeDownloader):
+            root = Path(temp)
+            with youtube_cookies.youtube_dl("https://youtube.com/watch?v=abc", root, {}) as request:
+                with self.assertRaises(youtube_cookies.YoutubeDownloadFailure) as caught:
+                    request.extract_info("https://youtube.com/watch?v=abc", download=False)
+            message = youtube_cookies.user_error(caught.exception, "https://youtube.com/watch?v=abc", root)
+
+        self.assertEqual(attempts, [False])
+        self.assertEqual(caught.exception.youtube_category, "bot_challenge")
+        self.assertIn("explicitly challenged", message)
+        self.assertIn("distinct from a video being private", message)
+        self.assertNotIn("Netscape cookies.txt", message)
+
     def test_cookie_fallback_is_not_used_for_po_token_or_network_failures(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -177,6 +206,7 @@ class YoutubeCookieTests(unittest.TestCase):
         cases = (
             ("HTTP Error 403: Forbidden", "forbidden"),
             ("HTTP Error 429: Too Many Requests", "rate_limited"),
+            ("Sign in to confirm you're not a bot", "bot_challenge"),
             ("Connection timed out", "network"),
             ("PO Token required", "po_token"),
             ("No supported JavaScript runtime could be found", "javascript_runtime"),
@@ -192,6 +222,10 @@ class YoutubeCookieTests(unittest.TestCase):
         self.assertEqual(
             youtube_cookies._classify_youtube_failure("yt-dlp stopped", {"authentication"}),
             "authentication",
+        )
+        self.assertEqual(
+            youtube_cookies._classify_youtube_failure("yt-dlp stopped", {"bot_challenge"}),
+            "bot_challenge",
         )
 
     def test_incidental_auth_warning_does_not_trigger_cookie_fallback(self):
@@ -251,7 +285,7 @@ class YoutubeCookieTests(unittest.TestCase):
 
     def test_actionable_youtube_error_does_not_echo_extractor_details(self):
         message = youtube_cookies.user_error(
-            RuntimeError("Sign in to confirm you're not a bot; private cookie token"),
+            RuntimeError("Login required; private cookie token"),
             "https://www.youtube.com/watch?v=abc",
         )
         self.assertIn("Netscape cookies.txt", message)
@@ -264,6 +298,7 @@ class YoutubeCookieTests(unittest.TestCase):
             ("PO Token required for GVS request", "Proof-of-Origin (PO) token"),
             ("HTTP Error 429: Too Many Requests", "rate-limited this request"),
             ("HTTP Error 403: Forbidden", "denied the media request"),
+            ("Sign in to confirm you're not a bot", "explicitly challenged"),
             ("Requested format is not available", "returned no format"),
         )
         url = "https://www.youtube.com/watch?v=abc"

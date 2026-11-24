@@ -29,9 +29,14 @@ def _classify_youtube_failure(message: str, logged_categories=()) -> str:
         "ejs challenge solver", "challenge solver script",
     )):
         return "javascript_runtime"
-    if "429" in lower or "too many requests" in lower or "rate limit" in lower or "unusual traffic" in lower:
+    if "429" in lower or "too many requests" in lower or "rate limit" in lower:
         return "rate_limited"
-    if any(term in lower for term in ("sign in to confirm", "not a bot", "login required", "authentication", "confirm your age", "cookies are no longer valid")):
+    if any(term in lower for term in (
+        "not a bot", "automated requests", "automated traffic", "bot challenge",
+        "unusual traffic",
+    )):
+        return "bot_challenge"
+    if any(term in lower for term in ("sign in to confirm", "login required", "authentication", "confirm your age", "cookies are no longer valid")):
         return "authentication"
     if "403" in lower or "forbidden" in lower or "blocked" in lower:
         return "forbidden"
@@ -44,7 +49,7 @@ def _classify_youtube_failure(message: str, logged_categories=()) -> str:
     if "no module named 'yt_dlp'" in lower or "no module named \"yt_dlp\"" in lower:
         return "dependency"
     categories = set(logged_categories or ())
-    for category in ("po_token", "javascript_runtime", "rate_limited", "authentication", "forbidden", "unavailable", "no_formats", "network", "dependency"):
+    for category in ("po_token", "javascript_runtime", "rate_limited", "bot_challenge", "authentication", "forbidden", "unavailable", "no_formats", "network", "dependency"):
         if category in categories:
             return category
     return "unknown"
@@ -318,7 +323,10 @@ class _YoutubeRequest:
         try:
             return self._invoke(method, args, kwargs)
         except YoutubeDownloadFailure as first_error:
-            if first_error.youtube_category != "authentication":
+            # A saved owner session may clear either a genuine sign-in gate or
+            # an explicit YouTube bot challenge. Keep the first attempt public
+            # and unauthenticated; never repeatedly retry a rejected session.
+            if first_error.youtube_category not in ("authentication", "bot_challenge"):
                 raise
             with self._private_cookie_copy() as cookie_file:
                 if cookie_file is None:
@@ -344,6 +352,18 @@ def user_error(error: BaseException, url: str, data_dir: Path | None = None) -> 
         return "YouTube requires a Proof-of-Origin (PO) token for this video or stream. Cookies alone cannot provide it; this request was not bypassed. Try another publicly available video/format or wait for supported token-provider configuration."
     if category == "rate_limited":
         return "YouTube rate-limited this request (HTTP 429 or equivalent). This can be an account or shared server-IP limit. Wait before retrying; repeated attempts may extend the block."
+    if category == "bot_challenge":
+        status = cookie_state(data_dir)
+        if status == "available":
+            return (
+                "YouTube explicitly challenged this request as automated traffic. The unauthenticated attempt and the one optional saved-session fallback were rejected. "
+                "This does not prove the video is private; YouTube may be evaluating the request or its network origin, and yt-dlp cannot safely override that challenge. Wait before retrying."
+            )
+        return (
+            "YouTube explicitly challenged this server request as automated traffic (the not-a-bot check). "
+            "That is distinct from a video being private or age-restricted. No saved owner session is available for the single optional fallback, "
+            "and the challenge cannot be safely bypassed. Wait before retrying; repeated attempts may extend the block."
+        )
     if category == "forbidden":
         return "YouTube denied the media request (HTTP 403). The cause can be a PO-token requirement, an expired stream URL, or a network/IP restriction; the safe diagnostic did not identify which one."
     if category == "unavailable":
